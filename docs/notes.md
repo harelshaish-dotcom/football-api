@@ -49,3 +49,37 @@ teams = db.query(Team).options(selectinload(Team.players)).all()
 ```
 
 **Benefit:** Loads all players in ONE query with IN clause instead of N separate queries.
+
+match events:
+
+{
+  "match_id": 209,
+  "minute": 67,
+  "type": "goal",
+  "player": {"id": 9, "name": "Kylian Mbappe"},
+  "detail": {"assist_by": "Vinicius Jr", "body_part": "right foot", "situation": "open play", "xg": 0.35}
+}
+
+{
+  "match_id": 201,
+  "minute": 28,
+  "type": "card",
+  "player": {"id": 5, "name": "Sergio Ramos"},
+  "detail": {"card_type": "yellow", "reason": "tackle"}
+}
+
+{
+  "match_id": 190,
+  "minute": 57,
+  "type": "substitution",
+  "player": {"id": 10, "name": "Vini Jr"},
+  "detail": {"player_out": {"id": 9, "name": "Kylian Mbappe"}}
+}
+
+{
+  "match_id": 267,
+  "minute": 96,
+  "type": "var",
+  "player": {"id": 9, "name": "Kylian Mbappe"},
+  "detail": {"decision": "goal_cancellation", "reason": "offside", "reviewed_minute": 98}
+}

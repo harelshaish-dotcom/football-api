@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from core.deps import get_current_user
 from schemas.user import UserOut
 from sqlalchemy.orm import Session
-from database.connection import get_db
+from database.postgres import get_db
 from models import Match, User
 
 router = APIRouter(prefix="/users", tags=["users"])

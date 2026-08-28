@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
-from database.connection import get_db
+from database.postgres import get_db
 from schemas.league import LeagueCreate, LeagueUpdate, LeagueOut
 import controllers.leagues as leagues_ctl
 from sqlalchemy import func, case
