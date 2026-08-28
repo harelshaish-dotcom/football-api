@@ -20,6 +20,7 @@ erDiagram
     PLAYERS {
         int player_id PK
         string name
+        int age
         enum position
         int shirt_number
         int height
