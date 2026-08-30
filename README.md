@@ -8,13 +8,8 @@ A FastAPI REST API for managing football teams and players.
 - Pagination support (limit, offset)
 - Postman collection for testing
 
-## Setup
+## Note
 
 ```bash
-pip install fastapi pydantic uvicorn email-validator
-uvicorn main:app --reload --port 8000
+This is a work in progress.
 ```
-
-## API Docs
-
-Visit `http://localhost:8000/docs` for interactive API documentation.
