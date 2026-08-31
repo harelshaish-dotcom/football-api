@@ -17,7 +17,7 @@ def list_leagues(db: Session, country: str | None, limit: int, offset: int):
     if country is not None:
         q = q.filter(League.country == country)
     total = q.count()
-    rows = q.order_by(League.league_id).offset(offset).limit(limit).all()
+    rows = q.order_by(League.id).offset(offset).limit(limit).all()
     return rows, total
 
 

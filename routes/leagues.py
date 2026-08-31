@@ -5,6 +5,8 @@ from schemas.league import LeagueCreate, LeagueUpdate, LeagueOut
 import controllers.leagues as leagues_ctl
 from sqlalchemy import func, case
 from models import League, Team, Match
+from core.cache import get_cached, set_cached
+import time
 
 router = APIRouter(prefix="/leagues", tags=["leagues"])
 
@@ -31,7 +33,19 @@ def list_leagues(
 
 @router.get("/{league_id}/table")
 def get_league_table(league_id: int, db: Session = Depends(get_db)):
-    # Get all teams in league, with aggregated match stats
+    import asyncio
+    
+    # Try to get from cache
+    cache_key = f"league_table:{league_id}"
+    cached_result = asyncio.run(get_cached(cache_key))
+    
+    if cached_result:
+        cached_result["_cache"] = "HIT"
+        return cached_result
+    
+    # Cache miss - compute standings
+    start_time = time.time()
+    
     standings = (
         db.query(
             Team.name,
@@ -61,19 +75,30 @@ def get_league_table(league_id: int, db: Session = Depends(get_db)):
                     else_=0
                 )
             ).label("lost"),
-            (func.sum(case(((Match.home_team_id == Team.id), Match.home_score), ((Match.away_team_id == Team.id), Match.away_score), else_=0)) or 0).label("goals_for"),
-            (func.sum(case(((Match.home_team_id == Team.id), Match.away_score), ((Match.away_team_id == Team.id), Match.home_score), else_=0)) or 0).label("goals_against"),
-            ((func.sum(case(((Match.home_team_id == Team.id) & (Match.home_score > Match.away_score), 3), ((Match.away_team_id == Team.id) & (Match.away_score > Match.home_score), 3), ((Match.home_team_id == Team.id) & (Match.home_score == Match.away_score), 1), ((Match.away_team_id == Team.id) & (Match.away_score == Match.home_score), 1), else_=0)) or 0)).label("points"),
+            func.coalesce(func.sum(case(((Match.home_team_id == Team.id), Match.home_score), ((Match.away_team_id == Team.id), Match.away_score), else_=0)), 0).label("goals_for"),
+            func.coalesce(func.sum(case(((Match.home_team_id == Team.id), Match.away_score), ((Match.away_team_id == Team.id), Match.home_score), else_=0)), 0).label("goals_against"),
+            func.coalesce(func.sum(case(((Match.home_team_id == Team.id) & (Match.home_score > Match.away_score), 3), ((Match.away_team_id == Team.id) & (Match.away_score > Match.home_score), 3), ((Match.home_team_id == Team.id) & (Match.home_score == Match.away_score), 1), ((Match.away_team_id == Team.id) & (Match.away_score == Match.home_score), 1), else_=0)), 0).label("points"),
         )
         .join(Team.league)
         .outerjoin(Match, (Match.home_team_id == Team.id) | (Match.away_team_id == Team.id))
         .filter(Team.league_id == league_id)
         .group_by(Team.id, Team.name)
-        .order_by(func.sum(case(((Match.home_team_id == Team.id) & (Match.home_score > Match.away_score), 3), ((Match.away_team_id == Team.id) & (Match.away_score > Match.home_score), 3), ((Match.home_team_id == Team.id) & (Match.home_score == Match.away_score), 1), ((Match.away_team_id == Team.id) & (Match.away_score == Match.home_score), 1), else_=0)).desc())
+        .order_by(func.coalesce(func.sum(case(((Match.home_team_id == Team.id) & (Match.home_score > Match.away_score), 3), ((Match.away_team_id == Team.id) & (Match.away_score > Match.home_score), 3), ((Match.home_team_id == Team.id) & (Match.home_score == Match.away_score), 1), ((Match.away_team_id == Team.id) & (Match.away_score == Match.home_score), 1), else_=0)), 0).desc())
         .all()
     )
     
-    return {"standings": standings}
+    elapsed = time.time() - start_time
+    
+    result = {
+        "standings": [dict(row._mapping) for row in standings],
+        "_timing_ms": round(elapsed * 1000, 2),
+        "_cache": "MISS"
+    }
+    
+    # Cache for 5 minutes (300 seconds)
+    asyncio.run(set_cached(cache_key, result, ttl=300))
+    
+    return result
 
 @router.get("/{league_id}", response_model=LeagueOut)
 def get_league(league_id: int, db: Session = Depends(get_db)):

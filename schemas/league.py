@@ -17,7 +17,7 @@ class LeagueUpdate(BaseModel):
 class LeagueOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    league_id: int
+    id: int
     name: str
     country: str
     date_founded: datetime

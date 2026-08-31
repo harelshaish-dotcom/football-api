@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 from jose import jwt, JWTError
 import os
+import uuid
 
 
 def hash_password(plain: str) -> str:
@@ -18,11 +19,13 @@ ACCESS_TOKEN_MINUTES = 30
 
 def create_access_token(user_id: int, is_admin: bool) -> str:
     now = datetime.now(timezone.utc)
+    exp = now + timedelta(minutes=ACCESS_TOKEN_MINUTES)
     claims = {
         "sub": str(user_id),
         "admin": is_admin,
+        "jti": str(uuid.uuid4()),  # JWT ID for logout blocklist
         "iat": now,
-        "exp": now + timedelta(minutes=ACCESS_TOKEN_MINUTES),
+        "exp": exp,
     }
     return jwt.encode(claims, SECRET_KEY, algorithm=ALGORITHM)
 

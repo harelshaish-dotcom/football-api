@@ -20,6 +20,7 @@ class Team(Base):
     back_populates="followed_teams")
     league_id = Column(Integer, ForeignKey("leagues.id"), nullable=False, index=True)
     date_founded = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     league = relationship("League", back_populates="teams")
     players = relationship("Player", back_populates="team")
