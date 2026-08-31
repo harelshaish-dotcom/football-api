@@ -1,5 +1,5 @@
 from sqlalchemy import Boolean, Column, DateTime, Integer, String, func, ForeignKey, Table
-from database.connection import Base
+from database.postgres import Base
 from sqlalchemy.orm import relationship
 
 follows = Table(

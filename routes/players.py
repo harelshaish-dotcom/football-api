@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from database.connection import get_db
+from database.postgres import get_db
 from schemas.players import PlayerCreate, PlayerUpdate, PlayerOut
 import controllers.players as players_ctl
 from core.deps import get_current_admin
+from sqlalchemy.orm import Session
+from models.user import User
 
 router = APIRouter(prefix="/players", tags=["players"])
 

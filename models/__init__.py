@@ -1,4 +1,4 @@
-from database.connection import Base
+from database.postgres import Base
 from models.league import League
 from models.team import Team
 from models.players import Player

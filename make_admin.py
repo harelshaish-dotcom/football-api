@@ -1,6 +1,5 @@
 import argparse
-
-from database.connection import SessionLocal
+from database.postgres import SessionLocal
 from models.user import User
 
 

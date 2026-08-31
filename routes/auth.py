@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from controllers import auth as auth_ctl
 from core.security import create_access_token, decode_token, ACCESS_TOKEN_MINUTES
-from database.connection import get_db
+from database.postgres import get_db
 from schemas.user import UserCreate, UserOut
 from core.cache import check_rate_limit, get_rate_limit_ttl, add_to_blocklist
 from core.deps import get_current_user

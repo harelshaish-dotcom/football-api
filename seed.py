@@ -1,11 +1,14 @@
-from database.connection import engine, SessionLocal
+from dotenv import load_dotenv
+load_dotenv()
+from database.postgres import engine, SessionLocal
 from models.league import League
 from models.team import Team
 from models.players import Player
-from database.connection import Base
+from database.postgres import Base
 from datetime import datetime
 from models.user import User
 from core.security import hash_password
+
 
 db = SessionLocal()
 
@@ -80,5 +83,4 @@ admin_user = User(
 )
 db.add(admin_user)
 db.commit()
-
 db.close()
