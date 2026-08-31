@@ -65,6 +65,8 @@ async def get_match_events(match_id: int, db: Session = Depends(get_db), skip: i
         doc["id"] = str(doc["_id"])
         doc.pop("_id", None)
 
+        
+
     return docs
 
 @router.post("/{match_id}/events", status_code=201)
@@ -76,7 +78,14 @@ async def create_match_event(match_id: int, payload: EventCreate, db: Session = 
     doc["match_id"] = match_id
     result = await events.insert_one(doc)
     doc["id"] = str(result.inserted_id)
-    doc.pop("_id", None) 
+    doc.pop("_id", None)
+    await publish("match-events", key=str(match_id), value={
+        "event_id": doc["id"],
+        "match_id": match_id,
+        "type": payload.type,
+        "player_id": payload.player.id,
+        "minute": payload.minute,
+    })
     return doc
 
 
