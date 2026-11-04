@@ -6,10 +6,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routes import auth, leagues, matches, players, stats, teams, users
 from app.core.cache import redis_client
 from app.core.events import start_producer, stop_producer  # noqa: F401  (used once Kafka is re-enabled below)
 from app.db.mongo import ensure_indexes
+from app.routes import auth, leagues, matches, players, stats, teams, users
 
 logger = logging.getLogger("uvicorn.error")
 

@@ -85,7 +85,7 @@ Alembic reads its database URL from `alembic.ini`.
 football-api/
 ├── app/
 │   ├── main.py              # FastAPI app, startup checks, router registration
-│   ├── api/routes/          # HTTP endpoints, one module per resource
+│   ├── routes/              # HTTP endpoints, one module per resource
 │   ├── controllers/         # database queries used by the routes
 │   ├── core/                # config, security (JWT/passwords), auth dependencies, Redis cache, Kafka producer
 │   ├── db/                  # PostgreSQL and MongoDB connections
