@@ -1,9 +1,17 @@
-.venv/
+# Python
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets / local data
 .env
 *.db
 *.sqlite3
-.pytest_cache/
+*.log
+
+# Editors / OS
 .idea/
-football-api/
+.vscode/
+.DS_Store

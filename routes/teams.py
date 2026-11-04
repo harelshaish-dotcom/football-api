@@ -7,7 +7,7 @@ import controllers.players as player_ctl
 from core.deps import get_current_admin
 from models import Team
 from schemas.players import PlayerOut
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import selectinload
 from core.cache import get_cached, set_cached, delete_cached
 from models.user import User
 import time
@@ -107,7 +107,7 @@ def get_team_players(team_id: int, db: Session = Depends(get_db)):
     if not team:
         raise HTTPException(404, "Team not found")
         
-    players, total = player_ctl.list_players_club(db, team_id, limit=100, offset=0)
+    players, total = player_ctl.list_players(db, team_id, None, limit=100, offset=0)
     return players
 
 @router.patch("/{team_id}", response_model=TeamOut)

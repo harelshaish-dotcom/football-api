@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from datetime import datetime
 from models.enums import POSITIONS
 

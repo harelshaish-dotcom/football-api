@@ -1,6 +1,5 @@
 from sqlalchemy import Column, Integer, String, DateTime, func, ForeignKey
 from database.postgres import Base
-import datetime
 from sqlalchemy.orm import relationship
 from models.user import follows
 home_matches = relationship("Match", foreign_keys="Match.home_team_id", back_populates="home_team")

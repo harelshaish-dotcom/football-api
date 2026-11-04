@@ -4,7 +4,7 @@ from database.postgres import get_db
 from schemas.league import LeagueCreate, LeagueUpdate, LeagueOut
 import controllers.leagues as leagues_ctl
 from sqlalchemy import func, case
-from models import League, Team, Match
+from models import Team, Match
 from core.cache import get_cached, set_cached
 import time
 

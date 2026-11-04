@@ -1,10 +1,9 @@
 from dotenv import load_dotenv
 load_dotenv()
-from database.postgres import engine, SessionLocal
+from database.postgres import SessionLocal
 from models.league import League
 from models.team import Team
 from models.players import Player
-from database.postgres import Base
 from datetime import datetime
 from models.user import User
 from core.security import hash_password

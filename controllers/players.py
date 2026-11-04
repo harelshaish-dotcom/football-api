@@ -18,14 +18,6 @@ def list_players(db: Session, team_id: int | None, country: str | None,
     rows = q.order_by(Player.id).offset(offset).limit(limit).all()
     return rows, total
 
-def list_players_club(db: Session, team_id: int | None, limit: int, offset: int):
-    q = db.query(Player)
-    if team_id is not None:
-        q = q.filter(Player.team_id == team_id)
-    total = q.count()
-    rows = q.order_by(Player.id).offset(offset).limit(limit).all()
-    return rows, total
-
 
 def create(db: Session, payload: PlayerCreate) -> Player:
     player = Player(**payload.model_dump())

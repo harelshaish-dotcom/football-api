@@ -23,7 +23,3 @@ bcrypt==5.0.0
 
 # Config
 python-dotenv==1.2.3
-
-# Scripts / tests
-requests==2.34.2
-httpx==0.28.1

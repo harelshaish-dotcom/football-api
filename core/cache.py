@@ -1,6 +1,5 @@
 import redis.asyncio as redis
 import json
-import asyncio
 
 r = redis.from_url("redis://localhost:6379", decode_responses=True)
 
@@ -35,24 +34,6 @@ async def delete_cached(key: str):
     except Exception as e:
         print(f"Cache delete error: {e}")
         return False
-
-
-async def invalidate_pattern(pattern: str):
-    """Delete all keys matching a pattern"""
-    try:
-        cursor = 0
-        count = 0
-        while True:
-            cursor, keys = await r.scan(cursor, match=pattern, count=100)
-            if keys:
-                await r.delete(*keys)
-                count += len(keys)
-            if cursor == 0:
-                break
-        return count
-    except Exception as e:
-        print(f"Cache invalidate pattern error: {e}")
-        return 0
 
 
 async def check_rate_limit(key: str, max_attempts: int = 5, window_seconds: int = 60) -> tuple[bool, int]:
