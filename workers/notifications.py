@@ -1,112 +1,106 @@
-import asyncio, json, os
+"""Notifications worker: tells followers of a team when that team scores.
+
+Run with: python -m workers.notifications
+Start several copies to see Kafka spread partitions across one consumer group.
+"""
+
+import asyncio
+import json
+import logging
+import os
+
 from aiokafka import AIOKafkaConsumer
 from aiokafka.abc import ConsumerRebalanceListener
-import logging
+from aiokafka.structs import ConsumerRecord
 
-from database.postgres import SessionLocal
-from models import Player, Team, User
-from core.cache import r
-from core.events import start_producer, stop_producer, publish
+from app.core.config import KAFKA_BOOTSTRAP_SERVERS
+from app.db.postgres import SessionLocal
+from app.models import Player, Team, User
+from workers.common import MATCH_EVENTS_TOPIC, claim, run_consumer, setup_logging
 
 GROUP_ID = "notifications"
 WORKER_ID = os.getpid()
-MAX_ATTEMPTS = 3
-DLQ_TOPIC = "match-events-dlq"
+
+logger = logging.getLogger(__name__)
 
 
-async def claim(event_id: str) -> bool:
-    """SET NX dedup: returns True the first time this event_id is seen, False on replay."""
-    key = f"processed:{GROUP_ID}:{event_id}"
-    was_new = await r.set(key, "1", nx=True, ex=86400)
-    return bool(was_new)
-
-
-def notify_goal(event: dict):
+def notify_goal(event: dict) -> None:
+    """Notify every follower of the scoring player's team (currently: log a line each)."""
     db = SessionLocal()
     try:
         player = db.get(Player, event["player_id"])
         if player is None:
-            logging.warning("goal event for unknown player_id=%s", event["player_id"])
+            logger.warning("goal event for unknown player_id=%s", event["player_id"])
             return
 
         team = player.team
-        followers = (
-            db.query(User)
-            .join(User.followed_teams)
-            .filter(Team.id == team.id)
-            .all()
-        )
+        followers = db.query(User).join(User.followed_teams).filter(Team.id == team.id).all()
         for user in followers:
-            print(f"[notify:{WORKER_ID}] {user.email}: goal for {team.name} (match {event['match_id']}, minute {event['minute']})")
+            logger.info(
+                "[notify:%s] %s: goal for %s (match %s, minute %s)",
+                WORKER_ID,
+                user.email,
+                team.name,
+                event["match_id"],
+                event["minute"],
+            )
     finally:
         db.close()
 
 
-async def handle(event: dict):
+async def handle(event: dict) -> None:
+    """Handle one match event; only goals trigger notifications, each at most once."""
     if event.get("type") != "goal":
         return
-    if not await claim(event["event_id"]):
-        logging.info("duplicate event_id=%s, skipping (already processed)", event["event_id"])
+    if not await claim(GROUP_ID, event["event_id"]):
+        logger.info("duplicate event_id=%s, skipping (already processed)", event["event_id"])
         return
     notify_goal(event)
 
 
 class LogRebalances(ConsumerRebalanceListener):
-    async def on_partitions_revoked(self, revoked):
+    """Log which partitions this worker gains or loses when the group rebalances."""
+
+    async def on_partitions_revoked(self, revoked) -> None:
         if revoked:
-            print(f"[notifications:{WORKER_ID}] partitions revoked: {sorted(p.partition for p in revoked)}")
+            logger.info(
+                "[notifications:%s] partitions revoked: %s",
+                WORKER_ID,
+                sorted(p.partition for p in revoked),
+            )
 
-    async def on_partitions_assigned(self, assigned):
-        print(f"[notifications:{WORKER_ID}] partitions assigned: {sorted(p.partition for p in assigned)}")
+    async def on_partitions_assigned(self, assigned) -> None:
+        logger.info(
+            "[notifications:%s] partitions assigned: %s",
+            WORKER_ID,
+            sorted(p.partition for p in assigned),
+        )
 
 
-async def main():
+def log_message(msg: ConsumerRecord) -> None:
+    """Log where each message came from (shows partition ownership per worker)."""
+    logger.info(
+        "[notifications:%s] partition=%s offset=%s event_id=%s",
+        WORKER_ID,
+        msg.partition,
+        msg.offset,
+        msg.value.get("event_id"),
+    )
+
+
+async def main() -> None:
+    """Start consuming match events in the `notifications` group."""
     consumer = AIOKafkaConsumer(
-        bootstrap_servers="localhost:9092",
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         group_id=GROUP_ID,
         value_deserializer=lambda b: json.loads(b.decode()),
         auto_offset_reset="earliest",
         enable_auto_commit=False,
     )
-    consumer.subscribe(topics=["match-events"], listener=LogRebalances())
-    await start_producer()
-    await consumer.start()
-    try:
-        async for msg in consumer:
-            print(f"[notifications:{WORKER_ID}] partition={msg.partition} offset={msg.offset} event_id={msg.value.get('event_id')}")
-
-            last_error = None
-            for attempt in range(1, MAX_ATTEMPTS + 1):
-                try:
-                    await handle(msg.value)
-                    last_error = None
-                    break
-                except Exception as e:
-                    last_error = e
-                    logging.exception(
-                        "attempt %d/%d failed for partition=%s offset=%s: %s",
-                        attempt, MAX_ATTEMPTS, msg.partition, msg.offset, e,
-                    )
-                    if attempt < MAX_ATTEMPTS:
-                        await asyncio.sleep(0.2 * attempt)
-
-            if last_error is not None:
-                await publish(DLQ_TOPIC, key=msg.key.decode() if msg.key else None, value={
-                    "original": msg.value,
-                    "error": str(last_error),
-                    "group_id": GROUP_ID,
-                    "attempts": MAX_ATTEMPTS,
-                })
-                logging.error(
-                    "poison message sent to %s after %d attempts: partition=%s offset=%s",
-                    DLQ_TOPIC, MAX_ATTEMPTS, msg.partition, msg.offset,
-                )
-
-            await consumer.commit()
-    finally:
-        await stop_producer()
-        await consumer.stop()
+    consumer.subscribe(topics=[MATCH_EVENTS_TOPIC], listener=LogRebalances())
+    await run_consumer(consumer, GROUP_ID, handle, on_message=log_message)
 
 
 if __name__ == "__main__":
+    setup_logging()
     asyncio.run(main())

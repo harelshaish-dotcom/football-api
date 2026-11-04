@@ -1,0 +1,26 @@
+[project]
+name = "football-api"
+version = "0.2.0"
+description = "FastAPI REST API for football leagues, teams, players and live match events"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["alembic"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # import sorting
+    "N",       # PEP 8 naming
+    "UP",      # modern Python syntax
+    "B",       # likely bugs
+]
+ignore = [
+    "B008",  # FastAPI's Depends()/Query() in argument defaults is the intended pattern
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "workers", "scripts"]
