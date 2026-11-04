@@ -463,11 +463,10 @@ This is painful because:
 **Pseudo-code of what's required:**
 ```python
 league = db.query(League).get(league_id)
-matches = (
-    db.query(Match)
-    .filter((Match.home_team.league_id == league_id) | (Match.away_team.league_id == league_id))
-    .all()
-)
+matches = db.query(Match).filter(
+    (Match.home_team.league_id == league_id) | 
+    (Match.away_team.league_id == league_id)
+).all()
 
 for match in matches:
     # N MongoDB queries!
