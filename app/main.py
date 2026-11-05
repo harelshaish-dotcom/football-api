@@ -26,11 +26,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         logger.warning("Redis unreachable: %s", e)
 
-    # await start_producer()
+    await start_producer()
 
     yield
 
-    # await stop_producer()
+    await stop_producer()
 
 
 app = FastAPI(title="Football API", version="0.2.0", lifespan=lifespan)
