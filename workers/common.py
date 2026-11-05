@@ -23,11 +23,24 @@ def setup_logging() -> None:
     logging.getLogger("aiokafka").setLevel(logging.WARNING)
 
 
-async def claim(group_id: str, event_id: str) -> bool:
-    """SET NX dedup: returns True the first time this event_id is seen, False on replay."""
-    key = f"processed:{group_id}:{event_id}"
-    was_new = await redis_client.set(key, "1", nx=True, ex=86400)
-    return bool(was_new)
+def _processed_key(group_id: str, event_id: str) -> str:
+    return f"processed:{group_id}:{event_id}"
+
+
+async def is_processed(group_id: str, event_id: str) -> bool:
+    """True if this group already finished handling this event_id (a replay/duplicate)."""
+    return bool(await redis_client.exists(_processed_key(group_id, event_id)))
+
+
+async def mark_processed(group_id: str, event_id: str) -> None:
+    """Record that this group finished handling event_id. Call only AFTER the work succeeded.
+
+    Marking after (not before) the work means a failure or a crash leaves no mark, so the
+    retry / redelivery does the work again instead of skipping it as a "duplicate".
+    Trade-off: a crash between the work and this call makes the work run twice
+    (at-least-once), so handlers should tolerate an occasional repeat.
+    """
+    await redis_client.set(_processed_key(group_id, event_id), "1", ex=86400)
 
 
 async def _handle_with_retry(

@@ -16,7 +16,13 @@ from aiokafka.structs import ConsumerRecord
 from app.core.config import KAFKA_BOOTSTRAP_SERVERS
 from app.db.postgres import SessionLocal
 from app.models import Player, Team, User
-from workers.common import MATCH_EVENTS_TOPIC, claim, run_consumer, setup_logging
+from workers.common import (
+    MATCH_EVENTS_TOPIC,
+    is_processed,
+    mark_processed,
+    run_consumer,
+    setup_logging,
+)
 
 GROUP_ID = "notifications"
 WORKER_ID = os.getpid()
@@ -52,10 +58,11 @@ async def handle(event: dict) -> None:
     """Handle one match event; only goals trigger notifications, each at most once."""
     if event.get("type") != "goal":
         return
-    if not await claim(GROUP_ID, event["event_id"]):
+    if await is_processed(GROUP_ID, event["event_id"]):
         logger.info("duplicate event_id=%s, skipping (already processed)", event["event_id"])
         return
     notify_goal(event)
+    await mark_processed(GROUP_ID, event["event_id"])  # only reached if notify_goal succeeded
 
 
 class LogRebalances(ConsumerRebalanceListener):
