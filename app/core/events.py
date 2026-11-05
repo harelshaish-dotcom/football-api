@@ -6,6 +6,7 @@ from typing import Any
 
 from aiokafka import AIOKafkaProducer
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
+from aiokafka.errors import TopicAlreadyExistsError, for_code
 
 from app.core.config import KAFKA_BOOTSTRAP_SERVERS
 from app.db.mongo import events
@@ -35,13 +36,25 @@ async def ensure_topics() -> None:
     try:
         existing = set(await admin.list_topics())
         missing = [t for t in (MATCH_EVENTS_TOPIC, DLQ_TOPIC) if t not in existing]
-        if missing:
-            new_topics = [
-                NewTopic(name, num_partitions=TOPIC_PARTITIONS, replication_factor=1)
-                for name in missing
-            ]
-            await admin.create_topics(new_topics)
-            logger.info("created Kafka topics %s with %d partitions", missing, TOPIC_PARTITIONS)
+        if not missing:
+            return
+        new_topics = [
+            NewTopic(name, num_partitions=TOPIC_PARTITIONS, replication_factor=1)
+            for name in missing
+        ]
+        response = await admin.create_topics(new_topics)
+        # aiokafka doesn't raise per-topic errors; they come back as (topic, code, message).
+        # "Already exists" is fine: the API and the workers may start at the same time,
+        # all see the topic missing, and race to create it.
+        created = []
+        for topic, error_code, *message in response.topic_errors:
+            if error_code == TopicAlreadyExistsError.errno:
+                continue
+            if error_code != 0:
+                raise for_code(error_code)(f"creating topic {topic}: {message}")
+            created.append(topic)
+        if created:
+            logger.info("created Kafka topics %s with %d partitions", created, TOPIC_PARTITIONS)
     finally:
         await admin.close()
 

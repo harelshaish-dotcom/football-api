@@ -48,8 +48,12 @@ async def handle_goal(event: dict) -> None:
     # Recompute from Mongo instead of +1, so a redelivered or republished event can't
     # double-count. The API no longer rebuilds on create (this worker does); it still
     # rebuilds on PATCH/DELETE, which aren't published to Kafka.
-    if await rebuild_leaderboard():
-        logger.info("[stats] leaderboard rebuilt after goal by player %s", event["player_id"])
+    # rebuild_leaderboard() returns False instead of raising; raise so the retry/DLQ logic
+    # runs and mark_processed() below is not reached. This worker is the only thing that
+    # updates the board after a new goal, so a swallowed failure would leave it stale.
+    if not await rebuild_leaderboard():
+        raise RuntimeError("leaderboard rebuild failed")
+    logger.info("[stats] leaderboard rebuilt after goal by player %s", event["player_id"])
 
     # Synchronous SQLAlchemy query -> run in a thread so it doesn't block the event loop.
     league_id = await asyncio.to_thread(get_league_id, event["player_id"])

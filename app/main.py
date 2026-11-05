@@ -28,8 +28,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Kafka down must not take the whole API down: start without it, events are still
     # saved in Mongo with published=false, and scripts/republish_events.py sends them later.
+    # Separate steps: a topic-setup problem must not stop the producer from starting.
     try:
         await ensure_topics()
+    except Exception as e:
+        logger.warning("Kafka topic setup failed (topics may be auto-created): %s", e)
+    try:
         await start_producer()
         logger.info("Kafka producer started")
     except Exception as e:
