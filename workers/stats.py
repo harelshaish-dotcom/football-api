@@ -45,12 +45,14 @@ async def handle_goal(event: dict) -> None:
         logger.info("duplicate event_id=%s, skipping (already processed)", event["event_id"])
         return
 
-    # Recompute from Mongo instead of +1: the API also rebuilds on goal changes,
-    # so an increment here would double-count.
+    # Recompute from Mongo instead of +1, so a redelivered or republished event can't
+    # double-count. The API no longer rebuilds on create (this worker does); it still
+    # rebuilds on PATCH/DELETE, which aren't published to Kafka.
     if await rebuild_leaderboard():
         logger.info("[stats] leaderboard rebuilt after goal by player %s", event["player_id"])
 
-    league_id = get_league_id(event["player_id"])
+    # Synchronous SQLAlchemy query -> run in a thread so it doesn't block the event loop.
+    league_id = await asyncio.to_thread(get_league_id, event["player_id"])
     if league_id is not None:
         await delete_cached(f"league_table:{league_id}")
         logger.info("[stats] invalidated league_table cache for league %s", league_id)

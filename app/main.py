@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
 from app.core.cache import redis_client
-from app.core.events import start_producer, stop_producer  # noqa: F401  (used once Kafka is re-enabled below)
+from app.core.events import ensure_topics, start_producer, stop_producer
 from app.db.mongo import ensure_indexes
 from app.routes import auth, leagues, matches, players, stats, teams, users
 
@@ -18,7 +18,7 @@ logger = logging.getLogger("uvicorn.error")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Prepare MongoDB indexes and check Redis on startup."""
+    """Prepare MongoDB indexes, check Redis and connect to Kafka on startup."""
     await ensure_indexes()
     try:
         await redis_client.ping()
@@ -26,7 +26,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         logger.warning("Redis unreachable: %s", e)
 
-    await start_producer()
+    # Kafka down must not take the whole API down: start without it, events are still
+    # saved in Mongo with published=false, and scripts/republish_events.py sends them later.
+    try:
+        await ensure_topics()
+        await start_producer()
+        logger.info("Kafka producer started")
+    except Exception as e:
+        logger.warning("Kafka unreachable, starting without producer: %s", e)
 
     yield
 

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -60,7 +61,8 @@ async def login(payload: UserCreate, request: Request, db: Session = Depends(get
     await _enforce_login_rate_limit(request)
 
     email = str(payload.email).lower()
-    user = auth_ctl.authenticate(db, email, payload.password)
+    # bcrypt is slow on purpose (CPU-bound): run it in a thread, not on the event loop.
+    user = await asyncio.to_thread(auth_ctl.authenticate, db, email, payload.password)
     if user is None or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -88,7 +90,7 @@ async def login_form(
     """Log in with a form (used by the Authorize button in /docs). Same rate limit as /login."""
     await _enforce_login_rate_limit(request)
 
-    user = auth_ctl.authenticate(db, form.username.lower(), form.password)
+    user = await asyncio.to_thread(auth_ctl.authenticate, db, form.username.lower(), form.password)
     if user is None or not user.is_active:
         raise HTTPException(
             status_code=401,

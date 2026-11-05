@@ -61,7 +61,9 @@ async def handle(event: dict) -> None:
     if await is_processed(GROUP_ID, event["event_id"]):
         logger.info("duplicate event_id=%s, skipping (already processed)", event["event_id"])
         return
-    notify_goal(event)
+    # notify_goal uses a synchronous SQLAlchemy session; run it in a thread so the
+    # blocking DB round-trips don't freeze the event loop (heartbeats, other messages).
+    await asyncio.to_thread(notify_goal, event)
     await mark_processed(GROUP_ID, event["event_id"])  # only reached if notify_goal succeeded
 
 

@@ -221,7 +221,8 @@ Header: `Retry-After: 59` (approximate seconds remaining in rate limit window)
 **Implementation:** Redis sorted set with player goals as scores
 
 **How it works:**
-- When a goal event is created (`POST /matches/{id}/events` with type="goal"), the player's score is incremented using ZINCRBY
+- When a goal event is created (`POST /matches/{id}/events` with type="goal"), the API publishes it to Kafka and the **stats worker** rebuilds the whole board from MongoDB (`rebuild_leaderboard()`: aggregate goals per player, write to a temp key, `RENAME` over the live key). Editing or deleting a goal (`PATCH`/`DELETE` on the event, or deleting the match) rebuilds it directly in the API, since those changes aren't published to Kafka.
+- Why rebuild instead of `ZINCRBY +1`: an increment can't be undone when a goal is edited or deleted, and a redelivered/republished Kafka message would count twice. A rebuild from Mongo (the source of truth) gives the same result no matter how often it runs. `python -m scripts.rebuild_leaderboard` does the same by hand.
 - Leaderboard key format: `leaderboard:season:{season_id}`
 - Member format: `player:{player_id}`
 
@@ -538,7 +539,8 @@ publishes to Kafka.
 
 **Work moved off the request path:**
 - `notify_goal`: Postgres join `Player -> Team -> followers`, then one print per follower
-- stats: `ZINCRBY` on the Redis leaderboard, then `DEL` on `league_table:{league_id}`
+- stats: rebuild the Redis leaderboard from Mongo, then `DEL` on `league_table:{league_id}`
+  (at the time of the measurements below this was a `ZINCRBY +1`; see the leaderboard section)
 
 ## Methodology
 
@@ -550,7 +552,8 @@ Two measurements, both against the same running server/infra:
 2. **Isolated work cost** — 20x calls, in-process, timing exactly two things:
    - `AFTER`: `events.insert_one(doc)` + `publish("match-events", ...)` — what the request
      handler does today.
-   - `extra work`: `notify_goal(event)` + `update_leaderboard(player_id)` +
+   - `extra work`: `notify_goal(event)` + `update_leaderboard(player_id)` (since replaced by
+     `rebuild_leaderboard()`) +
      `delete_cached(f"league_table:{league_id}")` — the work the workers do now, timed as if
      it still ran inline.
    - `BEFORE` = `AFTER` + `extra work`, i.e. the latency the endpoint would have if this logic
@@ -629,9 +632,58 @@ dedup check): 3 failed attempts were logged, the message landed on `match-events
 next (valid) message on the same partition was processed immediately afterward — the offset
 advanced past the poison message instead of stalling on it.
 
-Note: since `handle()` is already idempotent (SET NX), a message that fails on attempt 1 but
-partially applies its side effect, then succeeds on attempt 2, cannot double-count — retries are
-safe for the same reason replay-after-crash is safe.
+### Dedup and retries: mark processed only after success
+
+The first version claimed the event (`SET processed:{group}:{event_id} NX`) *before* doing the
+work. That broke retries: when attempt 1 raised, attempt 2 found the key, logged "duplicate",
+and returned normally, so the message counted as handled, never reached the DLQ, and its offset
+was committed. The goal was silently lost.
+
+Now each handler checks `is_processed()` first, does the work, and only then calls
+`mark_processed()`. A failure (or a crash) leaves no mark, so the retry / redelivery does the
+work. Trade-off: a crash in the gap between "work done" and "mark written" runs the work twice
+(at-least-once). That is harmless for stats (the rebuild is idempotent) and means a rare
+duplicate alert for notifications. The alternative, claim first and `DEL` on failure, avoids
+that, but a hard crash (no `except` runs) leaves the claim behind and the redelivery is skipped:
+the message would be lost instead of repeated.
+
+### When the DLQ itself fails
+
+The DLQ is written with `send()`, which raises if Kafka doesn't ack. The exception stops the
+worker *before* `consumer.commit()`, so the message is redelivered on restart. Catching it and
+moving on would be wrong: committing the next message's offset implicitly commits past this one.
+
+## Topics, startup and the outbox
+
+- **Topics**: `ensure_topics()` (`app/core/events.py`, AIOKafkaAdminClient) creates
+  `match-events` and `match-events-dlq` with 3 partitions at API and worker startup if they
+  don't exist. Otherwise the first publish auto-creates them with the broker default of 1
+  partition. Existing topics are left as they are.
+- **API startup**: if Kafka is unreachable the API logs a warning and starts without a producer
+  instead of refusing to start. `send()` then raises "producer is not started".
+- **Outbox**: `POST /matches/{id}/events` saves the event with `published: false`, publishes,
+  and flips it to `true` once Kafka acks. If Kafka is down the request still returns 201 (the
+  event is saved). `python -m scripts.republish_events` sends everything still `false`; the
+  workers dedupe by `event_id`, so a resend is safe.
+- **Blocking calls**: the workers' Postgres lookups (`notify_goal`, `get_league_id`) are
+  synchronous SQLAlchemy, so they run via `asyncio.to_thread` to keep the event loop free.
+
+## Worker loop: batches, versions, shutdown
+
+- **Batch commits**: `run_consumer` reads up to 100 messages with `getmany()` and commits once
+  per batch, per partition, the offset after the last message that was handled or
+  dead-lettered. If one message can't even be dead-lettered, the messages before it are
+  committed and it and everything after it are redelivered; already-handled ones are then
+  skipped by `is_processed()`.
+- **Schema version**: match-event messages carry `"schema_version": 1`. A worker that gets a
+  version it doesn't know sends the message straight to the DLQ (no retries) instead of
+  guessing. Messages without the field (from before versioning) count as version 1.
+- **Graceful shutdown**: Ctrl+C / SIGTERM lets the current message finish, commits it, and
+  stops ("stopped cleanly"). Unhandled messages in the batch are redelivered next time.
+  A second Ctrl+C quits immediately.
+- **Kafka storage**: `docker-compose.yml` sets `KAFKA_LOG_DIRS=/var/lib/kafka/data` on a named
+  volume (`kafkadata`), so topics, messages and committed offsets survive re-creating the
+  container. Before this the broker wrote to `/tmp/kafka-logs` inside the container.
 
 # What Should Not Be Async
 
@@ -649,12 +701,13 @@ loop thread for its full duration, and every other coroutine on that worker (eve
 in-flight request) would stall until it finished. Under load, one `/auth/register` call would
 pause the entire process, not just that request.
 
-This is already handled correctly in this codebase, not by accident: `register` and `login` in
-`routes/auth.py` are declared as plain `def`, not `async def`. FastAPI runs sync path-operation
-functions in a threadpool automatically, so the blocking bcrypt call ties up one thread-pool
-worker, not the event loop — concurrent requests on other routes keep flowing. Making these
-routes `async def` without also explicitly offloading the hash (e.g. `run_in_executor`) would be
-a regression, not an improvement, despite `async` reading as "the fast/modern option."
+In this codebase: `register` in `routes/auth.py` is a plain `def`. FastAPI runs sync
+path-operation functions in a threadpool automatically, so the blocking bcrypt call ties up one
+thread-pool worker, not the event loop — concurrent requests on other routes keep flowing.
+`login` and `/auth/token` had to become `async def` (they `await` the Redis rate limiter), so
+they explicitly offload the check with `await asyncio.to_thread(auth_ctl.authenticate, ...)`.
+Making a route `async def` *without* that offload would be a regression (this actually happened
+once): every login would freeze the whole API for the length of one bcrypt check.
 
 The general rule this illustrates: reach for `async` for I/O-bound waiting (DB queries, Kafka
 publish/consume, Redis, HTTP calls — everything else in this API). For CPU-bound work, the

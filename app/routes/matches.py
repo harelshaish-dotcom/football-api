@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.controllers import matches as matches_ctl
 from app.core.cache import rebuild_leaderboard
 from app.core.deps import api_rate_limit, get_current_admin
-from app.core.events import publish
+from app.core.events import publish_match_event
 from app.core.responses import RATE_LIMITED, errors
 from app.db.mongo import events
 from app.db.postgres import get_db
@@ -139,34 +139,26 @@ async def create_match_event(
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    """Record an event (admin only), store it in MongoDB and publish it to Kafka."""
+    """Record an event (admin only), store it in MongoDB and publish it to Kafka.
+
+    Outbox pattern: the event is saved with published=false and flipped to true once
+    Kafka acks. If Kafka is down the request still succeeds (the event is saved) and
+    scripts/republish_events.py sends it later, so no event is silently lost.
+    The workers (not this request) update the leaderboard and notify followers.
+    """
     match = matches_ctl.get_by_id(db, match_id)
     if not match:
         raise HTTPException(404, "Match not found")
 
     doc = payload.model_dump()
     doc["match_id"] = match_id
-    result = await events.insert_one(doc)
-    doc["id"] = str(result.inserted_id)
-    doc.pop("_id", None)
+    doc["published"] = False
+    await events.insert_one(doc)  # sets doc["_id"]
 
-    if payload.type == "goal":
-        await rebuild_leaderboard()
+    if await publish_match_event(doc):
+        doc["published"] = True
 
-    # publish() logs and swallows its own errors.
-    await publish(
-        "match-events",
-        key=str(match_id),
-        value={
-            "event_id": doc["id"],
-            "match_id": match_id,
-            "type": payload.type,
-            "player_id": payload.player.id,
-            "minute": payload.minute,
-        },
-    )
-
-    return doc
+    return _serialize(doc)
 
 
 @router.patch(

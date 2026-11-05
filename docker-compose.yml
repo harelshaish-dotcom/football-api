@@ -1,6 +1,6 @@
 services:
   kafka:
-    image: apache/kafka:latest
+    image: apache/kafka:4.3.1  # pinned: "latest" could jump a major version on the next pull
     container_name: kafka
     ports: ["9092:9092"]
     environment:
@@ -12,6 +12,14 @@ services:
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      # Keep topics, messages and consumer offsets across container re-creation.
+      # Without KAFKA_LOG_DIRS the broker writes to /tmp/kafka-logs inside the container.
+      # /var/lib/kafka/data is owned by the image's non-root user, so a named volume
+      # mounted there inherits the right permissions.
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+      # CLUSTER_ID is left at the image's fixed default, so the stored data matches on
+      # every restart. (If you set it, it must be a base64 UUID: kafka-storage.sh random-uuid.)
+    volumes: ["kafkadata:/var/lib/kafka/data"]
 
   postgres:
     image: postgres:16
@@ -40,3 +48,4 @@ volumes:
   pgdata:
   mongodata:
   redisdata:
+  kafkadata:
