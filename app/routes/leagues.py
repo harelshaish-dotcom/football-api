@@ -1,15 +1,15 @@
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.controllers import leagues as leagues_ctl
+from app.controllers import teams as teams_ctl
 from app.core.cache import get_cached, set_cached
 from app.core.deps import api_rate_limit, get_current_admin
 from app.core.responses import RATE_LIMITED, errors
 from app.db.postgres import get_db
-from app.models import Match, Team
+from app.models import Team
 from app.models.user import User
 from app.schemas.league import LeagueCreate, LeagueOut, LeagueUpdate
 
@@ -19,13 +19,6 @@ router = APIRouter(
     dependencies=[Depends(api_rate_limit)],
     responses=RATE_LIMITED,
 )
-
-# Building blocks for the league table: "this team played at home / away"
-_is_home = Match.home_team_id == Team.id
-_is_away = Match.away_team_id == Team.id
-_home_win = Match.home_score > Match.away_score
-_away_win = Match.away_score > Match.home_score
-_draw = Match.home_score == Match.away_score
 
 
 @router.post(
@@ -75,56 +68,12 @@ async def get_league_table(league_id: int, db: Session = Depends(get_db)):
     # Cache miss - compute standings
     start_time = time.time()
 
-    points = func.coalesce(
-        func.sum(
-            case(
-                (_is_home & _home_win, 3),
-                (_is_away & _away_win, 3),
-                (_is_home & _draw, 1),
-                (_is_away & _draw, 1),
-                else_=0,
-            )
-        ),
-        0,
-    )
-
-    standings = (
-        db.query(
-            Team.name,
-            func.count(case((Match.status == "finished", Match.id))).label("played"),
-            func.sum(case((_is_home & _home_win, 1), (_is_away & _away_win, 1), else_=0)).label(
-                "won"
-            ),
-            func.sum(case((_is_home & _draw, 1), (_is_away & _draw, 1), else_=0)).label("drawn"),
-            func.sum(
-                case(
-                    (_is_home & (Match.home_score < Match.away_score), 1),
-                    (_is_away & (Match.away_score < Match.home_score), 1),
-                    else_=0,
-                )
-            ).label("lost"),
-            func.coalesce(
-                func.sum(case((_is_home, Match.home_score), (_is_away, Match.away_score), else_=0)),
-                0,
-            ).label("goals_for"),
-            func.coalesce(
-                func.sum(case((_is_home, Match.away_score), (_is_away, Match.home_score), else_=0)),
-                0,
-            ).label("goals_against"),
-            points.label("points"),
-        )
-        .join(Team.league)
-        .outerjoin(Match, _is_home | _is_away)
-        .filter(Team.league_id == league_id)
-        .group_by(Team.id, Team.name)
-        .order_by(points.desc())
-        .all()
-    )
+    standings = teams_ctl.get_standings(db, league_id=league_id)
 
     elapsed = time.time() - start_time
 
     result = {
-        "standings": [dict(row._mapping) for row in standings],
+        "standings": [{k: v for k, v in row.items() if k != "id"} for row in standings],
         "_timing_ms": round(elapsed * 1000, 2),
         "_cache": "MISS",
     }

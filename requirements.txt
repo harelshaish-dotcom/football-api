@@ -23,3 +23,9 @@ bcrypt==5.0.0
 
 # Config
 python-dotenv==1.2.3
+
+# AI agents
+langchain==1.4.9
+langchain-core==1.7.6
+langchain-anthropic==1.7.10
+langchain-openai==1.7.4

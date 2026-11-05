@@ -20,3 +20,5 @@ DATABASE_URL: str = os.getenv(
 MONGO_URL: str = os.getenv("MONGO_URL", "mongodb://localhost:27017")
 REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")
 KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+
+AGENT_MODEL: str = os.getenv("AGENT_MODEL", "gpt-5-mini")
