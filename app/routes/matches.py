@@ -6,15 +6,24 @@ from sqlalchemy.orm import Session
 
 from app.controllers import matches as matches_ctl
 from app.core.cache import rebuild_leaderboard
-from app.core.deps import get_current_admin
+from app.core.deps import api_rate_limit, get_current_admin
 from app.core.events import publish
+from app.core.responses import RATE_LIMITED, errors
 from app.db.mongo import events
 from app.db.postgres import get_db
 from app.models import Team, User
 from app.schemas.event import EventCreate, EventUpdate, TagCreate
 from app.schemas.match import MatchCreate, MatchOut, MatchUpdate
 
-router = APIRouter(prefix="/matches", tags=["matches"])
+router = APIRouter(
+    prefix="/matches",
+    tags=["matches"],
+    dependencies=[Depends(api_rate_limit)],
+    responses=RATE_LIMITED,
+)
+
+_TEAMS_DIFFERENT = (400, "Home and away teams must be different")
+_EVENT_404 = (404, "Match or event not found")
 
 
 def _serialize(doc: dict) -> dict:
@@ -38,7 +47,12 @@ def _event_oid(event_id: str) -> ObjectId:
         raise HTTPException(404, "Event not found") from None
 
 
-@router.post("", status_code=201, response_model=MatchOut)
+@router.post(
+    "",
+    status_code=201,
+    response_model=MatchOut,
+    responses=errors(_TEAMS_DIFFERENT, 401, 403, (404, "Home or away team not found")),
+)
 def create_match(
     payload: MatchCreate,
     db: Session = Depends(get_db),
@@ -73,7 +87,7 @@ def list_matches(
     }
 
 
-@router.get("/{match_id}", response_model=MatchOut)
+@router.get("/{match_id}", response_model=MatchOut, responses=errors((404, "Match not found")))
 def get_match(match_id: int, db: Session = Depends(get_db)):
     """Get one match."""
     match = matches_ctl.get_by_id(db, match_id)
@@ -82,7 +96,7 @@ def get_match(match_id: int, db: Session = Depends(get_db)):
     return match
 
 
-@router.get("/{match_id}/events")
+@router.get("/{match_id}/events", responses=errors((404, "Match not found")))
 async def get_match_events(
     match_id: int,
     db: Session = Depends(get_db),
@@ -106,7 +120,19 @@ async def get_match_events(
     return [_serialize(doc) for doc in docs]
 
 
-@router.post("/{match_id}/events", status_code=201)
+@router.get("/{match_id}/events/{event_id}", responses=errors(_EVENT_404))
+async def get_match_event(match_id: int, event_id: str, db: Session = Depends(get_db)):
+    """Get one event of a match."""
+    _require_match(db, match_id)
+    doc = await events.find_one({"_id": _event_oid(event_id), "match_id": match_id})
+    if doc is None:
+        raise HTTPException(404, "Event not found")
+    return _serialize(doc)
+
+
+@router.post(
+    "/{match_id}/events", status_code=201, responses=errors(401, 403, (404, "Match not found"))
+)
 async def create_match_event(
     match_id: int,
     payload: EventCreate,
@@ -143,7 +169,10 @@ async def create_match_event(
     return doc
 
 
-@router.patch("/{match_id}/events/{event_id}")
+@router.patch(
+    "/{match_id}/events/{event_id}",
+    responses=errors((400, "No fields to update"), 401, 403, _EVENT_404),
+)
 async def update_match_event(
     match_id: int,
     event_id: str,
@@ -178,7 +207,9 @@ async def update_match_event(
     return _serialize(doc)
 
 
-@router.delete("/{match_id}/events/{event_id}", status_code=204)
+@router.delete(
+    "/{match_id}/events/{event_id}", status_code=204, responses=errors(401, 403, _EVENT_404)
+)
 async def delete_match_event(
     match_id: int,
     event_id: str,
@@ -195,7 +226,11 @@ async def delete_match_event(
     return Response(status_code=204)
 
 
-@router.post("/{match_id}/events/{event_id}/tags", status_code=201)
+@router.post(
+    "/{match_id}/events/{event_id}/tags",
+    status_code=201,
+    responses=errors(401, 403, _EVENT_404),
+)
 async def add_event_tag(
     match_id: int,
     event_id: str,
@@ -203,11 +238,11 @@ async def add_event_tag(
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    """Add a tag to an event (admin only)."""
+    """Add a tag to an event (admin only). Adding a tag it already has is a no-op."""
     _require_match(db, match_id)
     doc = await events.find_one_and_update(
         {"_id": _event_oid(event_id), "match_id": match_id},
-        {"$push": {"tags": payload.tag}},
+        {"$addToSet": {"tags": payload.tag}},
         return_document=ReturnDocument.AFTER,
     )
     if doc is None:
@@ -215,7 +250,7 @@ async def add_event_tag(
     return _serialize(doc)
 
 
-@router.delete("/{match_id}/events/{event_id}/tags/{tag}")
+@router.delete("/{match_id}/events/{event_id}/tags/{tag}", responses=errors(401, 403, _EVENT_404))
 async def remove_event_tag(
     match_id: int,
     event_id: str,
@@ -235,7 +270,7 @@ async def remove_event_tag(
     return _serialize(doc)
 
 
-@router.get("/{match_id}/timeline")
+@router.get("/{match_id}/timeline", responses=errors((404, "Match not found")))
 async def get_match_timeline(match_id: int, db: Session = Depends(get_db)):
     """A match's details plus all of its events in minute order."""
     match = matches_ctl.get_by_id(db, match_id)
@@ -259,7 +294,11 @@ async def get_match_timeline(match_id: int, db: Session = Depends(get_db)):
     }
 
 
-@router.patch("/{match_id}", response_model=MatchOut)
+@router.patch(
+    "/{match_id}",
+    response_model=MatchOut,
+    responses=errors(_TEAMS_DIFFERENT, 401, 403, (404, "Match, home or away team not found")),
+)
 def update_match(
     match_id: int,
     payload: MatchUpdate,
@@ -288,7 +327,7 @@ def update_match(
     return matches_ctl.update(db, match, payload)
 
 
-@router.delete("/{match_id}", status_code=204)
+@router.delete("/{match_id}", status_code=204, responses=errors(401, 403, (404, "Match not found")))
 async def delete_match(
     match_id: int,
     db: Session = Depends(get_db),

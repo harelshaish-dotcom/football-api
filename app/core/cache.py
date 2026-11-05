@@ -1,4 +1,4 @@
-"""Redis helpers: response caching, login rate limiting, JWT blocklist, live leaderboard.
+"""Redis helpers: response caching, rate limiting, JWT blocklist, leaderboard, team views.
 
 Every helper swallows Redis errors and returns a safe fallback, so the API keeps
 working (uncached) when Redis is down.
@@ -53,21 +53,100 @@ async def delete_cached(key: str) -> bool:
         return False
 
 
+async def delete_by_pattern(pattern: str) -> int:
+    """Remove every key matching `pattern` (e.g. "teams_list:*"). Returns how many were removed.
+
+    Uses SCAN, not KEYS, so Redis isn't blocked while it walks the keyspace.
+    """
+    try:
+        keys = [key async for key in redis_client.scan_iter(match=pattern, count=500)]
+        if not keys:
+            return 0
+        return await redis_client.unlink(*keys)
+    except Exception as e:
+        logger.warning("Cache delete-by-pattern error (%s): %s", pattern, e)
+        return 0
+
+
+# --- Team views and popularity ----------------------------------------------
+
+POPULAR_TEAMS_KEY = "popular:teams"
+
+
+def _views_key(team_id: int) -> str:
+    return f"team:{team_id}:views"
+
+
+async def increment_views(team_id: int) -> int:
+    """Count one view of a team: bump its counter and its score in the popularity ranking.
+
+    Both run in one MULTI/EXEC transaction so they can't drift apart.
+    Returns the new view count, or 0 if Redis is unavailable.
+    """
+    try:
+        async with redis_client.pipeline(transaction=True) as pipe:
+            pipe.incr(_views_key(team_id))
+            pipe.zincrby(POPULAR_TEAMS_KEY, 1, str(team_id))
+            views, _ = await pipe.execute()
+        return views
+    except Exception as e:
+        logger.warning("View counter error: %s", e)
+        return 0
+
+
+async def get_views(team_id: int) -> int:
+    """How many times a team was viewed; 0 if never, or if Redis is unavailable."""
+    try:
+        value = await redis_client.get(_views_key(team_id))
+        return int(value) if value else 0
+    except Exception as e:
+        logger.warning("View counter read error: %s", e)
+        return 0
+
+
+async def get_popular_teams(limit: int = 10) -> list[tuple[int, int]]:
+    """The most viewed teams as [(team_id, views), ...], most viewed first."""
+    try:
+        rows = await redis_client.zrevrange(POPULAR_TEAMS_KEY, 0, limit - 1, withscores=True)
+        return [(int(member), int(score)) for member, score in rows]
+    except Exception as e:
+        logger.warning("Popular teams read error: %s", e)
+        return []
+
+
+async def forget_team_views(team_id: int) -> bool:
+    """Drop a deleted team's view counter and its entry in the popularity ranking."""
+    try:
+        async with redis_client.pipeline(transaction=True) as pipe:
+            pipe.delete(_views_key(team_id))
+            pipe.zrem(POPULAR_TEAMS_KEY, str(team_id))
+            await pipe.execute()
+        return True
+    except Exception as e:
+        logger.warning("Forget team views error: %s", e)
+        return False
+
+
 # --- Rate limiting ----------------------------------------------------------
 
 
 async def check_rate_limit(
-    key: str, max_attempts: int = 5, window_seconds: int = 60
+    key: str,
+    max_attempts: int = 5,
+    window_seconds: int = 60,
+    client: redis.Redis | None = None,
 ) -> tuple[bool, int]:
     """Count one attempt for `key`.
 
     Returns (is_allowed, remaining_attempts). Fails open if Redis is unavailable.
+    `client` defaults to the shared `redis_client` (deps.get_redis passes the same one).
     """
+    client = redis_client if client is None else client
     try:
         # One MULTI/EXEC transaction: create the key with its expiry if it doesn't
         # exist yet (NX), then count the attempt. The key can never exist without
         # a TTL, so a crash can't leave an IP locked out forever.
-        async with redis_client.pipeline(transaction=True) as pipe:
+        async with client.pipeline(transaction=True) as pipe:
             pipe.set(key, 0, ex=window_seconds, nx=True)
             pipe.incr(key)
             _, current = await pipe.execute()
@@ -80,10 +159,11 @@ async def check_rate_limit(
         return True, max_attempts  # Allow on error
 
 
-async def get_rate_limit_ttl(key: str) -> int:
+async def get_rate_limit_ttl(key: str, client: redis.Redis | None = None) -> int:
     """Seconds until the rate-limit window for `key` resets."""
+    client = redis_client if client is None else client
     try:
-        ttl = await redis_client.ttl(key)
+        ttl = await client.ttl(key)
         return max(0, ttl)
     except Exception as e:
         logger.warning("Rate limit TTL error: %s", e)

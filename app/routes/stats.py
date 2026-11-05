@@ -1,8 +1,15 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from app.core.deps import api_rate_limit
+from app.core.responses import RATE_LIMITED
 from app.db.mongo import events
 
-router = APIRouter(prefix="/stats", tags=["stats"])
+router = APIRouter(
+    prefix="/stats",
+    tags=["stats"],
+    dependencies=[Depends(api_rate_limit)],
+    responses=RATE_LIMITED,
+)
 
 
 @router.get("/top-scorers")

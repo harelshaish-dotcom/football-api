@@ -1,12 +1,18 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_current_user
+from app.core.deps import api_rate_limit, get_current_user
+from app.core.responses import RATE_LIMITED, errors
 from app.db.postgres import get_db
 from app.models import Match, User
 from app.schemas.user import UserOut
 
-router = APIRouter(prefix="/users", tags=["users"])
+router = APIRouter(
+    prefix="/users",
+    tags=["users"],
+    dependencies=[Depends(api_rate_limit)],
+    responses=RATE_LIMITED,
+)
 
 
 @router.get("/me/feed")
@@ -27,7 +33,7 @@ def get_user_feed(db: Session = Depends(get_db)):
     return {"matches": matches}
 
 
-@router.get("/me", response_model=UserOut)
+@router.get("/me", response_model=UserOut, responses=errors(401))
 def get_me(current_user: User = Depends(get_current_user)):
     """The logged-in user's profile."""
     return current_user

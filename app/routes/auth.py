@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.controllers import auth as auth_ctl
 from app.core.cache import add_to_blocklist, check_rate_limit, get_rate_limit_ttl
+from app.core.deps import api_rate_limit
+from app.core.responses import errors
 from app.core.security import create_access_token, decode_token
 from app.db.postgres import get_db
 from app.schemas.user import UserCreate, UserOut
@@ -13,7 +15,13 @@ from app.schemas.user import UserCreate, UserOut
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/register",
+    response_model=UserOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(api_rate_limit)],
+    responses=errors((409, "A user with that email already exists"), 429),
+)
 def register(payload: UserCreate, db: Session = Depends(get_db)):
     """Create a new (non-admin) user account."""
     email = str(payload.email).lower()
@@ -40,7 +48,13 @@ async def _enforce_login_rate_limit(request: Request) -> None:
         )
 
 
-@router.post("/login")
+@router.post(
+    "/login",
+    responses=errors(
+        (401, "Invalid email or password"),
+        (429, "Too many login attempts (5 per minute per IP); see Retry-After"),
+    ),
+)
 async def login(payload: UserCreate, request: Request, db: Session = Depends(get_db)):
     """Log in with a JSON body. Limited to 5 attempts per minute per IP."""
     await _enforce_login_rate_limit(request)
@@ -59,7 +73,13 @@ async def login(payload: UserCreate, request: Request, db: Session = Depends(get
     }
 
 
-@router.post("/token")
+@router.post(
+    "/token",
+    responses=errors(
+        (401, "Invalid email or password"),
+        (429, "Too many login attempts (5 per minute per IP, shared with /login)"),
+    ),
+)
 async def login_form(
     request: Request,
     form: OAuth2PasswordRequestForm = Depends(),
@@ -78,7 +98,16 @@ async def login_form(
     return {"access_token": create_access_token(user.id, user.is_admin), "token_type": "bearer"}
 
 
-@router.post("/logout")
+@router.post(
+    "/logout",
+    dependencies=[Depends(api_rate_limit)],
+    responses=errors(
+        (400, "Token has no jti/exp claims"),
+        (401, "Missing or invalid token"),
+        429,
+        (503, "Redis unavailable, the token could not be blocked"),
+    ),
+)
 async def logout(request: Request):
     """Log out by adding the current token to the Redis blocklist."""
     auth_header = request.headers.get("Authorization", "")
