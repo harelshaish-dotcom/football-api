@@ -1,7 +1,5 @@
 """FastAPI dependencies for authenticated routes."""
 
-import asyncio
-
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
@@ -14,7 +12,7 @@ from app.models.user import User
 oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
 
-def get_current_user(token: str = Depends(oauth2), db: Session = Depends(get_db)) -> User:
+async def get_current_user(token: str = Depends(oauth2), db: Session = Depends(get_db)) -> User:
     """Resolve the bearer token to an active user, or raise 401."""
     creds_error = HTTPException(
         status.HTTP_401_UNAUTHORIZED,
@@ -27,10 +25,8 @@ def get_current_user(token: str = Depends(oauth2), db: Session = Depends(get_db)
 
     # Check if token is in blocklist (logged out)
     jti = payload.get("jti")
-    if jti:
-        is_blocked = asyncio.run(is_token_blocked(jti))
-        if is_blocked:
-            raise creds_error
+    if jti and await is_token_blocked(jti):
+        raise creds_error
 
     user = db.get(User, int(payload["sub"]))
     if user is None or not user.is_active:

@@ -1,15 +1,17 @@
-import logging
-
+from bson import ObjectId
+from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pymongo import ReturnDocument
 from sqlalchemy.orm import Session
 
 from app.controllers import matches as matches_ctl
+from app.core.cache import rebuild_leaderboard
 from app.core.deps import get_current_admin
 from app.core.events import publish
 from app.db.mongo import events
 from app.db.postgres import get_db
 from app.models import Team, User
-from app.schemas.event import EventCreate
+from app.schemas.event import EventCreate, EventUpdate, TagCreate
 from app.schemas.match import MatchCreate, MatchOut, MatchUpdate
 
 router = APIRouter(prefix="/matches", tags=["matches"])
@@ -20,6 +22,20 @@ def _serialize(doc: dict) -> dict:
     doc["id"] = str(doc["_id"])
     doc.pop("_id", None)
     return doc
+
+
+def _require_match(db: Session, match_id: int) -> None:
+    """404 if the match doesn't exist in Postgres."""
+    if not matches_ctl.get_by_id(db, match_id):
+        raise HTTPException(404, "Match not found")
+
+
+def _event_oid(event_id: str) -> ObjectId:
+    """Convert an event id to an ObjectId, 404 if it isn't a valid one."""
+    try:
+        return ObjectId(event_id)
+    except InvalidId:
+        raise HTTPException(404, "Event not found") from None
 
 
 @router.post("", status_code=201, response_model=MatchOut)
@@ -73,14 +89,18 @@ async def get_match_events(
     skip: int = 0,
     limit: int = 50,
     type: str | None = None,
+    player_id: int | None = None,
+    tag: str | None = None,
 ):
-    """List a match's events in minute order, optionally filtered by type."""
-    match = matches_ctl.get_by_id(db, match_id)
-    if not match:
-        raise HTTPException(404, "Match not found")
+    """List a match's events in minute order, optionally filtered by type, player or tag."""
+    _require_match(db, match_id)
     query = {"match_id": match_id}
     if type is not None:
         query["type"] = type
+    if player_id is not None:
+        query["player.id"] = player_id
+    if tag is not None:
+        query["tags"] = tag  # matches if `tag` is any element of the array
     cursor = events.find(query).sort("minute", 1).skip(skip).limit(limit)
     docs = await cursor.to_list(length=limit)
     return [_serialize(doc) for doc in docs]
@@ -104,22 +124,115 @@ async def create_match_event(
     doc["id"] = str(result.inserted_id)
     doc.pop("_id", None)
 
-    try:
-        await publish(
-            "match-events",
-            key=str(match_id),
-            value={
-                "event_id": doc["id"],
-                "match_id": match_id,
-                "type": payload.type,
-                "player_id": payload.player.id,
-                "minute": payload.minute,
-            },
-        )
-    except Exception as e:
-        logging.error("publish failed: %s", e)
+    if payload.type == "goal":
+        await rebuild_leaderboard()
+
+    # publish() logs and swallows its own errors.
+    await publish(
+        "match-events",
+        key=str(match_id),
+        value={
+            "event_id": doc["id"],
+            "match_id": match_id,
+            "type": payload.type,
+            "player_id": payload.player.id,
+            "minute": payload.minute,
+        },
+    )
 
     return doc
+
+
+@router.patch("/{match_id}/events/{event_id}")
+async def update_match_event(
+    match_id: int,
+    event_id: str,
+    payload: EventUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Update some fields of an event (admin only)."""
+    _require_match(db, match_id)
+    oid = _event_oid(event_id)
+
+    # exclude_none: an explicit null shouldn't blank out a required field.
+    changes = payload.model_dump(exclude_unset=True, exclude_none=True)
+    # Flatten the embedded player into dotted paths so a partial player
+    # update ({"name": ...}) doesn't wipe the other player fields.
+    player = changes.pop("player", None) or {}
+    for field, value in player.items():
+        changes[f"player.{field}"] = value
+    if not changes:
+        raise HTTPException(400, "No fields to update")
+
+    doc = await events.find_one_and_update(
+        {"_id": oid, "match_id": match_id},
+        {"$set": changes},
+        return_document=ReturnDocument.AFTER,
+    )
+    if doc is None:
+        raise HTTPException(404, "Event not found")
+    # Rebuild if the event is a goal now, or its type changed (it may have been one).
+    if doc.get("type") == "goal" or "type" in changes:
+        await rebuild_leaderboard()
+    return _serialize(doc)
+
+
+@router.delete("/{match_id}/events/{event_id}", status_code=204)
+async def delete_match_event(
+    match_id: int,
+    event_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Delete an event (admin only)."""
+    _require_match(db, match_id)
+    doc = await events.find_one_and_delete({"_id": _event_oid(event_id), "match_id": match_id})
+    if doc is None:
+        raise HTTPException(404, "Event not found")
+    if doc.get("type") == "goal":
+        await rebuild_leaderboard()
+    return Response(status_code=204)
+
+
+@router.post("/{match_id}/events/{event_id}/tags", status_code=201)
+async def add_event_tag(
+    match_id: int,
+    event_id: str,
+    payload: TagCreate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Add a tag to an event (admin only)."""
+    _require_match(db, match_id)
+    doc = await events.find_one_and_update(
+        {"_id": _event_oid(event_id), "match_id": match_id},
+        {"$push": {"tags": payload.tag}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if doc is None:
+        raise HTTPException(404, "Event not found")
+    return _serialize(doc)
+
+
+@router.delete("/{match_id}/events/{event_id}/tags/{tag}")
+async def remove_event_tag(
+    match_id: int,
+    event_id: str,
+    tag: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Remove every occurrence of a tag from an event (admin only)."""
+    _require_match(db, match_id)
+    doc = await events.find_one_and_update(
+        {"_id": _event_oid(event_id), "match_id": match_id},
+        {"$pull": {"tags": tag}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if doc is None:
+        raise HTTPException(404, "Event not found")
+    return _serialize(doc)
 
 
 @router.get("/{match_id}/timeline")
@@ -176,14 +289,17 @@ def update_match(
 
 
 @router.delete("/{match_id}", status_code=204)
-def delete_match(
+async def delete_match(
     match_id: int,
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    """Delete a match (admin only)."""
+    """Delete a match and all of its events (admin only)."""
     match = matches_ctl.get_by_id(db, match_id)
     if not match:
         raise HTTPException(404, "Match not found")
     matches_ctl.delete(db, match)
+    result = await events.delete_many({"match_id": match_id})
+    if result.deleted_count:
+        await rebuild_leaderboard()
     return Response(status_code=204)

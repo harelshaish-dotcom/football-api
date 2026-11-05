@@ -9,7 +9,7 @@ import logging
 
 from aiokafka import AIOKafkaConsumer
 
-from app.core.cache import delete_cached, update_leaderboard
+from app.core.cache import delete_cached, rebuild_leaderboard
 from app.core.config import KAFKA_BOOTSTRAP_SERVERS
 from app.db.postgres import SessionLocal
 from app.models import Player
@@ -39,8 +39,10 @@ async def handle_goal(event: dict) -> None:
         logger.info("duplicate event_id=%s, skipping (already processed)", event["event_id"])
         return
 
-    new_score = await update_leaderboard(event["player_id"])
-    logger.info("[stats] leaderboard: player %s -> %s goals", event["player_id"], new_score)
+    # Recompute from Mongo instead of +1: the API also rebuilds on goal changes,
+    # so an increment here would double-count.
+    if await rebuild_leaderboard():
+        logger.info("[stats] leaderboard rebuilt after goal by player %s", event["player_id"])
 
     league_id = get_league_id(event["player_id"])
     if league_id is not None:

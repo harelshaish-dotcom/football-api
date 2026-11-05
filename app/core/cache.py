@@ -11,6 +11,7 @@ from typing import Any
 import redis.asyncio as redis
 
 from app.core.config import REDIS_URL
+from app.db.mongo import events
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +64,13 @@ async def check_rate_limit(
     Returns (is_allowed, remaining_attempts). Fails open if Redis is unavailable.
     """
     try:
-        current = await redis_client.incr(key)
-        if current == 1:
-            # First attempt in this window, set expiry
-            await redis_client.expire(key, window_seconds)
+        # One MULTI/EXEC transaction: create the key with its expiry if it doesn't
+        # exist yet (NX), then count the attempt. The key can never exist without
+        # a TTL, so a crash can't leave an IP locked out forever.
+        async with redis_client.pipeline(transaction=True) as pipe:
+            pipe.set(key, 0, ex=window_seconds, nx=True)
+            pipe.incr(key)
+            _, current = await pipe.execute()
 
         remaining = max(0, max_attempts - current)
         is_allowed = current <= max_attempts
@@ -114,15 +118,34 @@ async def is_token_blocked(jti: str) -> bool:
 # --- Live leaderboard -------------------------------------------------------
 
 
-async def update_leaderboard(player_id: int, season: int = 1) -> int:
-    """Increment player's goal count in leaderboard sorted set. Returns new score."""
+async def rebuild_leaderboard(season: int = 1) -> bool:
+    """Recompute the leaderboard from the goal events in MongoDB (the source of truth).
+
+    The new board is built under a temporary key and swapped in with RENAME, so
+    readers never see a half-built board. Returns False if Mongo or Redis failed.
+    """
+    key = f"leaderboard:season:{season}"
+    tmp_key = f"{key}:rebuild"
     try:
-        key = f"leaderboard:season:{season}"
-        new_score = await redis_client.zincrby(key, 1, f"player:{player_id}")
-        return int(float(new_score))
+        pipeline = [
+            {"$match": {"type": "goal", "player.id": {"$ne": None}}},
+            {"$group": {"_id": "$player.id", "goals": {"$sum": 1}}},
+        ]
+        rows = await events.aggregate(pipeline).to_list(length=None)
+        scores = {f"player:{r['_id']}": r["goals"] for r in rows}
+
+        async with redis_client.pipeline(transaction=True) as pipe:
+            if scores:
+                pipe.delete(tmp_key)
+                pipe.zadd(tmp_key, scores)
+                pipe.rename(tmp_key, key)
+            else:
+                pipe.delete(key)
+            await pipe.execute()
+        return True
     except Exception as e:
-        logger.warning("Leaderboard update error: %s", e)
-        return 0
+        logger.warning("Leaderboard rebuild error: %s", e)
+        return False
 
 
 async def get_top_scorers(limit: int = 10, season: int = 1) -> list[dict]:
