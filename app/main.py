@@ -19,7 +19,10 @@ logger = logging.getLogger("uvicorn.error")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Prepare MongoDB indexes, check Redis and connect to Kafka on startup."""
-    await ensure_indexes()
+    try:
+        await ensure_indexes()
+    except Exception as e:
+        logger.warning("MongoDB unreachable, match-event routes will fail: %s", e)
     try:
         await redis_client.ping()
         logger.info("Redis connected")
