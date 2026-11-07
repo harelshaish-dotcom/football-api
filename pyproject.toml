@@ -4,6 +4,12 @@ version = "0.2.0"
 description = "FastAPI REST API for football leagues, teams, players and live match events"
 requires-python = ">=3.12"
 
+[tool.pytest.ini_options]
+# Put the project root on sys.path so `from app...` resolves however pytest is
+# invoked. Bare `pytest` does not add the cwd; `python -m pytest` does.
+pythonpath = ["."]
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
