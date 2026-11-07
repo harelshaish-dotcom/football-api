@@ -27,3 +27,15 @@ variable "ecs_infrastructure_role_name" {
   description = "Existing role Express Mode uses to manage the ALB and networking"
   default     = "ecsInfrastructureRoleForExpressServices"
 }
+
+variable "github_owner_id" {
+  type        = number
+  description = "Numeric GitHub user/org ID, used in the immutable OIDC subject claim"
+  default     = 234176880
+}
+
+variable "github_repository_id" {
+  type        = number
+  description = "Numeric GitHub repository ID, used in the immutable OIDC subject claim"
+  default     = 1346615291
+}

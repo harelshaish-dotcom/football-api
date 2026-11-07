@@ -18,3 +18,5 @@ __pycache__/
 
 .terraform/
 *.tfstate*
+# Local agent tooling
+.claude/

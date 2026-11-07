@@ -12,6 +12,20 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
+locals {
+  github_owner = split("/", var.github_repository)[0]
+  github_repo  = split("/", var.github_repository)[1]
+
+  # GitHub is moving the OIDC `sub` claim to an immutable form that embeds
+  # numeric IDs, so a rename cannot hand someone else your trust:
+  #   repo:OWNER@OWNER_ID/REPO@REPO_ID:ref:refs/heads/main
+  # Both forms are listed so the role works whichever one GitHub emits.
+  oidc_subjects = [
+    "repo:${var.github_repository}:*",
+    "repo:${local.github_owner}@${var.github_owner_id}/${local.github_repo}@${var.github_repository_id}:*",
+  ]
+}
+
 # The two roles the ECS console already created. Looked up, not created, so
 # Terraform fails with a clear message if a name is wrong.
 data "aws_iam_role" "ecs_task_execution" {
@@ -54,7 +68,7 @@ data "aws_iam_policy_document" "github_assume_role" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:*"]
+      values   = local.oidc_subjects
     }
   }
 }
