@@ -50,6 +50,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Football API", version="0.2.0", lifespan=lifespan)
 
 
+@app.get("/health", tags=["health"])
+async def health() -> dict[str, str]:
+    """Liveness probe for CI and the load balancer: 200 while the process is up."""
+    return {"status": "ok"}
+
+
 @app.exception_handler(IntegrityError)
 async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
     """Safety net: turn a database constraint violation into a clear 4xx instead of a 500.

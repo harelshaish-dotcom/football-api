@@ -1,0 +1,106 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: eu-central-1
+  ECR_REPOSITORY: football-api
+  ECS_CLUSTER: default
+  ECS_SERVICE: football-api
+  CONTAINER_PORT: "8000"
+
+jobs:
+  # ---- CI: runs on every push AND every pull request ----
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # matches the Dockerfile's python:3.12-slim
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Run tests
+        run: pytest -v
+
+  # ---- CD: only after tests pass, and only on a push to main ----
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      id-token: write   # required to request the OIDC token from GitHub
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Exchanges GitHub's OIDC token for temporary AWS credentials.
+      # No access keys are stored anywhere.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::246332569326:role/github-actions-ecs-role
+          role-session-name: github-actions-football-api
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: build
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            -t "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+            -t "$REGISTRY/$ECR_REPOSITORY:latest" \
+            .
+          docker push "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$REGISTRY/$ECR_REPOSITORY:latest"
+          echo "image=$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      # The secrets block is NOT optional: the action registers a new task
+      # definition, and anything omitted here disappears from the container.
+      # Without SECRET_KEY, app/core/security.py raises on import and the task dies.
+      - name: Deploy to ECS Express Mode
+        uses: aws-actions/amazon-ecs-deploy-express-service@v1
+        with:
+          service-name: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          image: ${{ steps.build.outputs.image }}
+          container-port: ${{ env.CONTAINER_PORT }}
+          execution-role-arn: arn:aws:iam::246332569326:role/ecsTaskExecutionRole
+          infrastructure-role-arn: arn:aws:iam::246332569326:role/service-role/ecsInfrastructureRoleForExpressServices
+          # Must be stated: the action defaults to 256/512, which would halve
+          # the running service's current 512/1024.
+          cpu: "512"
+          memory: "1024"
+          # Fail the workflow if the new tasks never reach a stable state,
+          # instead of reporting green over a crash-looping container.
+          wait-for-service-stability: true
+          secrets: |
+            [
+              {"name": "SECRET_KEY", "valueFrom": "arn:aws:secretsmanager:eu-central-1:246332569326:secret:football/secret-key-VOGLMr"},
+              {"name": "DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:eu-central-1:246332569326:secret:football/database-url-0NVCqQ"}
+            ]
