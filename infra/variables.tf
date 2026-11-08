@@ -39,3 +39,15 @@ variable "github_repository_id" {
   description = "Numeric GitHub repository ID, used in the immutable OIDC subject claim"
   default     = 1346615291
 }
+
+variable "state_bucket" {
+  type        = string
+  description = "S3 bucket holding the Terraform state"
+  default     = "football-api-tfstate-246332569326"
+}
+
+variable "uploads_bucket" {
+  type        = string
+  description = "S3 bucket for user-uploaded files"
+  default     = "football-api-uploads-246332569326"
+}

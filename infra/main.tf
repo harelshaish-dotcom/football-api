@@ -1,8 +1,16 @@
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.10"
   required_providers {
     aws = { source = "hashicorp/aws", version = "~> 6.0" }
     tls = { source = "hashicorp/tls", version = "~> 4.0" }
+  }
+
+  backend "s3" {
+    bucket       = "football-api-tfstate-246332569326"
+    key          = "infra/terraform.tfstate"
+    region       = "eu-central-1"
+    encrypt      = true
+    use_lockfile = true
   }
 }
 
@@ -157,4 +165,109 @@ resource "aws_iam_role_policy_attachment" "ecr_push" {
 resource "aws_iam_role_policy_attachment" "ecs_deploy" {
   role       = aws_iam_role.github_actions.name
   policy_arn = aws_iam_policy.ecs_deploy.arn
+}
+
+# ---------------------------------------------------------------------------
+# S3 bucket for user uploads
+# ---------------------------------------------------------------------------
+
+resource "aws_s3_bucket" "uploads" {
+  bucket = var.uploads_bucket
+}
+
+resource "aws_s3_bucket_versioning" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Private by default. Serve files through presigned URLs rather than making
+# the bucket public — a public bucket is the classic way user uploads leak.
+resource "aws_s3_bucket_public_access_block" "uploads" {
+  bucket                  = aws_s3_bucket.uploads.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# ---------------------------------------------------------------------------
+# Permissions so GitHub Actions can run Terraform itself
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "terraform" {
+  # Remote state, plus the .tflock file that use_lockfile creates.
+  statement {
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::${var.state_bucket}"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+    ]
+    resources = ["arn:aws:s3:::${var.state_bucket}/infra/*"]
+  }
+
+  statement {
+    effect    = "Allow"
+    actions   = ["sts:GetCallerIdentity"]
+    resources = ["*"]
+  }
+
+  # Reading and updating the IAM resources this configuration owns.
+  # Deliberately no Delete* actions: CI must not be able to destroy the very
+  # role it authenticates with, or the OIDC provider behind it.
+  statement {
+    effect = "Allow"
+    actions = [
+      "iam:GetRole",
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "iam:ListPolicyVersions",
+      "iam:ListRolePolicies",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListRoleTags",
+      "iam:GetOpenIDConnectProvider",
+      "iam:CreateRole",
+      "iam:UpdateRole",
+      "iam:UpdateAssumeRolePolicy",
+      "iam:TagRole",
+      "iam:CreatePolicy",
+      "iam:CreatePolicyVersion",
+      "iam:DeletePolicyVersion",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:CreateOpenIDConnectProvider",
+      "iam:TagOpenIDConnectProvider",
+      "iam:UpdateOpenIDConnectProviderThumbprint",
+    ]
+    resources = ["*"]
+  }
+
+  # Scoped to this one bucket by resource rather than by action. Enumerating
+  # every s3:Get*Configuration the provider reads on refresh is a losing game.
+  statement {
+    effect  = "Allow"
+    actions = ["s3:*"]
+    resources = [
+      "arn:aws:s3:::${var.uploads_bucket}",
+      "arn:aws:s3:::${var.uploads_bucket}/*",
+    ]
+  }
+}
+
+resource "aws_iam_policy" "terraform" {
+  name   = "GitHubActionsTerraformPolicy"
+  policy = data.aws_iam_policy_document.terraform.json
+}
+
+resource "aws_iam_role_policy_attachment" "terraform" {
+  role       = aws_iam_role.github_actions.name
+  policy_arn = aws_iam_policy.terraform.arn
 }
