@@ -148,3 +148,7 @@ jobs:
               {"name": "SECRET_KEY", "valueFrom": "arn:aws:secretsmanager:eu-central-1:246332569326:secret:football/secret-key-VOGLMr"},
               {"name": "DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:eu-central-1:246332569326:secret:football/database-url-0NVCqQ"}
             ]
+          min-task-count: 1
+          max-task-count: 3
+          auto-scaling-metric: AVERAGE_CPU
+          auto-scaling-target-value: 70
