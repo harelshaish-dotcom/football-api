@@ -44,8 +44,50 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes: ["redisdata:/data"]
 
+  # ---- Observability: Elastic stack (logs, traces, metrics) ----
+  # Local-dev setup: single node, security off, so nothing needs a password.
+  # Kibana: http://localhost:5601 -> Observability > Applications / Discover / Metrics.
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.6
+    container_name: elasticsearch
+    ports: ["9200:9200"]
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"  # fixed heap; Docker Desktop needs ~4 GB for the whole file
+    volumes: ["esdata:/usr/share/elasticsearch/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s || exit 1"]
+      interval: 10s
+      retries: 30
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.5.6
+    container_name: kibana
+    ports: ["5601:5601"]
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+    depends_on:
+      elasticsearch: {condition: service_healthy}
+
+  # Receives OpenTelemetry (OTLP) from the API and workers on :8200 and writes it to
+  # Elasticsearch as traces-apm*, metrics-apm* and logs-apm* data streams.
+  apm-server:
+    image: docker.elastic.co/apm/apm-server:9.5.6
+    container_name: apm-server
+    ports: ["8200:8200"]
+    command:
+      - -e  # log to stderr so `docker compose logs apm-server` shows it
+      - -E
+      - apm-server.host=0.0.0.0:8200
+      - -E
+      - output.elasticsearch.hosts=["http://elasticsearch:9200"]
+    depends_on:
+      elasticsearch: {condition: service_healthy}
+
 volumes:
   pgdata:
   mongodata:
   redisdata:
   kafkadata:
+  esdata:

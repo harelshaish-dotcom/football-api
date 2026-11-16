@@ -10,10 +10,12 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.cache import redis_client
 from app.core.events import ensure_topics, start_producer, stop_producer
+from app.core.logs import setup_logging
 from app.db.mongo import ensure_indexes
 from app.routes import auth, leagues, matches, players, stats, teams, users
 
-logger = logging.getLogger("uvicorn.error")
+setup_logging()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager

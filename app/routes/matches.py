@@ -9,6 +9,7 @@ from app.core.cache import rebuild_leaderboard
 from app.core.deps import api_rate_limit, get_current_admin
 from app.core.events import publish_match_event
 from app.core.responses import RATE_LIMITED, errors
+from app.core.telemetry import match_events_created
 from app.db.mongo import events
 from app.db.postgres import get_db
 from app.models import Team, User
@@ -157,6 +158,7 @@ async def create_match_event(
 
     if await publish_match_event(doc):
         doc["published"] = True
+    match_events_created.add(1, {"event.type": doc["type"], "published": doc["published"]})
 
     return _serialize(doc)
 

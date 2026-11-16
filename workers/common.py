@@ -7,6 +7,9 @@ from collections.abc import Awaitable, Callable
 
 from aiokafka import AIOKafkaConsumer
 from aiokafka.structs import ConsumerRecord, TopicPartition
+from opentelemetry import propagate
+from opentelemetry.context import Context
+from opentelemetry.trace import SpanKind
 
 from app.core.cache import redis_client
 from app.core.events import (
@@ -18,6 +21,8 @@ from app.core.events import (
     start_producer,
     stop_producer,
 )
+from app.core.logs import setup_logging as _setup_root_logging
+from app.core.telemetry import tracer, worker_messages
 from app.db.postgres import engine
 
 __all__ = ["DLQ_TOPIC", "MATCH_EVENTS_TOPIC"]  # re-exported for the workers
@@ -30,9 +35,8 @@ logger = logging.getLogger(__name__)
 
 
 def setup_logging() -> None:
-    """Log INFO and above to the console, keeping aiokafka's and SQLAlchemy's logs quiet."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logging.getLogger("aiokafka").setLevel(logging.WARNING)
+    """Log INFO and above (console + Elastic when instrumented), keeping SQLAlchemy quiet."""
+    _setup_root_logging()
     # The shared engine is created with echo=True for the API; in the workers every
     # query would be printed (twice), burying the worker's own log lines.
     engine.echo = False
@@ -91,12 +95,14 @@ async def _handle_with_retry(
     version = msg.value.get("schema_version", 1)  # messages from before versioning are v1
     if version not in SUPPORTED_SCHEMA_VERSIONS:
         await _dead_letter(msg, group_id, f"unsupported schema_version {version!r}", attempts=0)
+        worker_messages.add(1, {"group_id": group_id, "outcome": "unsupported_schema"})
         return
 
     last_error: Exception | None = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             await handle(msg.value)
+            worker_messages.add(1, {"group_id": group_id, "outcome": "ok", "attempts": attempt})
             return
         except Exception as e:
             last_error = e
@@ -115,6 +121,16 @@ async def _handle_with_retry(
     # then stops without committing this message, so it is redelivered on restart
     # instead of being committed while it exists nowhere (not handled, not in the DLQ).
     await _dead_letter(msg, group_id, str(last_error), attempts=MAX_ATTEMPTS)
+    worker_messages.add(1, {"group_id": group_id, "outcome": "dead_lettered"})
+
+
+def _trace_context(msg: ConsumerRecord) -> Context:
+    """The trace context the producer put in the message headers (empty if there is none).
+
+    Lets the work done for a message join the trace of the API request that published it.
+    """
+    carrier = {key: value.decode(errors="replace") for key, value in msg.headers or ()}
+    return propagate.extract(carrier)
 
 
 def _install_stop_handler() -> asyncio.Event:
@@ -167,7 +183,21 @@ async def run_consumer(
                             break  # unprocessed messages aren't committed -> redelivered
                         if on_message is not None:
                             on_message(msg)
-                        await _handle_with_retry(msg, group_id, handle)
+                        # One span per message, so the handler's Redis/Mongo/Postgres calls
+                        # and log lines nest under it instead of each starting its own trace.
+                        with tracer.start_as_current_span(
+                            f"{msg.topic} process",
+                            context=_trace_context(msg),
+                            kind=SpanKind.CONSUMER,
+                            attributes={
+                                "messaging.system": "kafka",
+                                "messaging.destination.name": msg.topic,
+                                "messaging.consumer.group.name": group_id,
+                                "messaging.destination.partition.id": str(msg.partition),
+                                "messaging.kafka.offset": msg.offset,
+                            },
+                        ):
+                            await _handle_with_retry(msg, group_id, handle)
                         done[tp] = msg.offset + 1
             finally:
                 if done:

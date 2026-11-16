@@ -20,6 +20,7 @@ A FastAPI backend for football leagues, teams, players and live match events, wi
 | Match events | MongoDB (Motor) |
 | Cache, rate limits, leaderboard | Redis |
 | Messaging | Kafka (aiokafka) |
+| Observability | OpenTelemetry, Elasticsearch, Kibana, Elastic APM Server |
 | Tooling | Docker Compose, Ruff |
 
 ## Getting started
@@ -37,7 +38,7 @@ pip install -r requirements.txt
 cp .env.example .env               # Windows: copy .env.example .env
                                    # then set SECRET_KEY to a long random string
 
-docker compose up -d               # PostgreSQL, MongoDB, Redis, Kafka
+docker compose up -d               # PostgreSQL, MongoDB, Redis, Kafka, Elastic stackC
 alembic upgrade head               # create the PostgreSQL tables
 python -m scripts.seed             # optional: sample leagues, teams, players + admin user
 ```
@@ -65,6 +66,50 @@ python -m workers.stats
 python -m scripts.make_admin you@example.com    # promote an existing user to admin
 ```
 
+## Observability (Elastic)
+
+`docker compose up -d` also starts an Elastic stack (9.5.6, local-dev mode, no passwords):
+
+| Service | URL | Role |
+|---|---|---|
+| Elasticsearch | http://localhost:9200 | stores everything |
+| Kibana | http://localhost:5601 | UI |
+| APM Server | http://localhost:8200 | receives OpenTelemetry (OTLP) and writes it to Elasticsearch |
+
+Elasticsearch takes a 1 GB heap; give Docker Desktop at least 4 GB of memory.
+
+To send data, start the API and workers through `scripts/instrumented.py`. It runs them under
+`opentelemetry-instrument` with the settings Elastic needs (see the defaults at the top of the file):
+
+```bash
+python -m scripts.instrumented football-api -m uvicorn app.main:app --reload
+python -m scripts.instrumented football-stats-worker -m workers.stats
+python -m scripts.instrumented football-notifications-worker -m workers.notifications
+```
+
+What is collected:
+
+- **Traces**: every HTTP request (FastAPI), with child spans for each PostgreSQL query
+  (SQLAlchemy), MongoDB command, Redis command and Kafka send/receive. The trace context
+  travels in the Kafka message headers, so a `POST /matches/{id}/events` and the worker that
+  handles the goal show up as one connected trace.
+- **Logs**: everything the API, uvicorn and the workers log (INFO and above), each line
+  tagged with the trace id of the request or message that wrote it. `app/core/logs.py` routes
+  all loggers through the root logger, where the exporter is attached.
+- **Metrics**: request rate/latency, process CPU and memory, plus two custom counters
+  (`app/core/telemetry.py`): `football.match_events.created` (by `event.type`, `published`)
+  and `football.worker.messages` (by `group_id`, `outcome`: ok / dead_lettered / unsupported_schema).
+
+Where to look in Kibana:
+
+- **Observability > Applications > Service inventory**: the three services, latency,
+  throughput, errors; open a transaction for its trace waterfall and the logs written during it.
+- **Observability > Applications > Service map**: API -> PostgreSQL / MongoDB / Redis / Kafka -> workers.
+- **Discover**: data view `logs-*` for logs; `metrics-*` for metrics (e.g. `football.worker.messages`).
+
+Without the wrapper (plain `uvicorn`, tests, CI, the production image) the OpenTelemetry API is a
+no-op and nothing is exported.
+
 ## Configuration
 
 Settings are read from environment variables or `.env` (see [app/core/config.py](app/core/config.py)):
@@ -87,12 +132,12 @@ football-api/
 │   ├── main.py              # FastAPI app, startup checks, router registration
 │   ├── routes/              # HTTP endpoints, one module per resource
 │   ├── controllers/         # database queries used by the routes
-│   ├── core/                # config, security (JWT/passwords), auth dependencies, Redis cache, Kafka producer
+│   ├── core/                # config, security (JWT/passwords), auth dependencies, Redis cache, Kafka producer, logging + metrics
 │   ├── db/                  # PostgreSQL and MongoDB connections
 │   ├── models/              # SQLAlchemy tables
 │   └── schemas/             # Pydantic request/response models
 ├── workers/                 # Kafka consumers (notifications, stats) and their shared retry/DLQ code
-├── scripts/                 # seed data, make_admin
+├── scripts/                 # seed data, make_admin, instrumented (OpenTelemetry launcher)
 ├── alembic/                 # database migrations
 ├── docs/                    # API spec and design notes
 ├── docker-compose.yml
