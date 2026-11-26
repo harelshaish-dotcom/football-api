@@ -7,6 +7,8 @@ from database.postgres import get_db
 from models import Team, User
 from schemas.match import MatchCreate, MatchOut, MatchUpdate
 from schemas.events import EventCreate
+from core.events import publish
+import logging
 
 router = APIRouter(prefix="/matches", tags=["matches"])
 
@@ -74,18 +76,24 @@ async def create_match_event(match_id: int, payload: EventCreate, db: Session = 
     match = matches_ctl.get_by_id(db, match_id)
     if not match:
         raise HTTPException(404, "Match not found")
+
     doc = payload.model_dump()
     doc["match_id"] = match_id
     result = await events.insert_one(doc)
     doc["id"] = str(result.inserted_id)
     doc.pop("_id", None)
-    await publish("match-events", key=str(match_id), value={
-        "event_id": doc["id"],
-        "match_id": match_id,
-        "type": payload.type,
-        "player_id": payload.player.id,
-        "minute": payload.minute,
-    })
+
+    try:
+        await publish("match-events", key=str(match_id), value={
+            "event_id": doc["id"],
+            "match_id": match_id,
+            "type": payload.type,
+            "player_id": payload.player.id,
+            "minute": payload.minute,
+        })
+    except Exception as e:
+        logging.error("publish failed: %s", e)
+
     return doc
 
 

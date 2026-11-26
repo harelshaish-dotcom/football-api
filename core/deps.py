@@ -8,7 +8,7 @@ from models.user import User
 from core.cache import is_token_blocked
 import asyncio
 
-oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
 
 def get_current_user(token: str = Depends(oauth2),

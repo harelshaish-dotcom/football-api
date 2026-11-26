@@ -525,4 +525,138 @@ match events:
 
 admin: 
 harelshaish@gmail.com
-examplepass
+  examplepass
+
+# POST /matches/{id}/events: Latency Before/After Moving Work Off the Request Path
+
+## Background
+
+`create_match_event` used to be the only place a goal's side effects happened. Two consumers
+(`workers/notifications.py`, `workers/stats.py`) now do that work asynchronously off a Kafka
+topic (`match-events`), so the endpoint itself only inserts the event doc into MongoDB and
+publishes to Kafka.
+
+**Work moved off the request path:**
+- `notify_goal`: Postgres join `Player -> Team -> followers`, then one print per follower
+- stats: `ZINCRBY` on the Redis leaderboard, then `DEL` on `league_table:{league_id}`
+
+## Methodology
+
+Two measurements, both against the same running server/infra:
+
+1. **Live endpoint** — 20x `POST /matches/1/events` against the real running API
+   (`http://127.0.0.1:8000`, not `localhost` — see DNS note below), full HTTP + JWT auth +
+   Mongo insert + Kafka publish.
+2. **Isolated work cost** — 20x calls, in-process, timing exactly two things:
+   - `AFTER`: `events.insert_one(doc)` + `publish("match-events", ...)` — what the request
+     handler does today.
+   - `extra work`: `notify_goal(event)` + `update_leaderboard(player_id)` +
+     `delete_cached(f"league_table:{league_id}")` — the work the workers do now, timed as if
+     it still ran inline.
+   - `BEFORE` = `AFTER` + `extra work`, i.e. the latency the endpoint would have if this logic
+     had never been moved to background consumers.
+
+The isolated measurement exists because the live endpoint's absolute number is dominated by
+constant HTTP/JWT overhead that's identical whether or not the Kafka offload exists — it can't
+by itself show what the offload bought us. Diffing `AFTER` vs `BEFORE` at the code level isolates
+that variable.
+
+## Results
+
+| Measurement | mean | median | p95 |
+|---|---|---|---|
+| Live endpoint today (HTTP + auth + Mongo + publish) | 19.56ms | 18.57ms | 30.33ms |
+| `AFTER` — Mongo insert + Kafka publish only | 6.15ms | 3.33ms | 10.91ms |
+| extra work — notify + leaderboard + cache invalidate | 16.46ms | 6.26ms | 8.28ms |
+| `BEFORE` — same work done inline (no offload) | 22.61ms | 9.57ms | 17.37ms |
+
+**Takeaway:** moving the notification/stats work off the request path roughly halves-to-thirds
+the endpoint's own processing cost (`AFTER` vs `BEFORE`, code-level: ~6ms vs ~23ms mean). The
+gap would widen a lot further under load or with more followers per team, since `notify_goal`'s
+cost scales with follower count and runs once per goal event no matter how many workers exist,
+whereas `publish()` is a fixed, small cost regardless of how much work happens downstream.
+
+**DNS note:** hitting the API via `http://localhost:8000` on this machine adds a flat ~2000ms to
+every request, including `/auth/login` and unauthenticated `GET /matches` — confirmed with
+`127.0.0.1` (47ms) vs `localhost` (2042ms) for the identical `GET /matches` request. This is a
+local Windows hostname-resolution artifact (IPv6 lookup timing out before IPv4 fallback), not
+applicable to app code; benchmarks above use `127.0.0.1` to avoid it.
+
+## Testing
+
+```bash
+# Live endpoint (repeat N times, record wall-clock per request)
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"harelshaish@gmail.com","password":"examplepass"}' | jq -r .access_token)
+
+curl -s -X POST http://127.0.0.1:8000/matches/1/events \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"minute":10,"type":"goal","player":{"id":1,"name":"Cristiano Ronaldo"}}' \
+  -w '\n%{time_total}s\n'
+```
+
+# Kafka Consumer Groups: Fan-out, Partitions, and Dead-Letter Queue
+
+## Fan-out (different consumer groups)
+
+`workers/notifications.py` (group `notifications`) and `workers/stats.py` (group `stats`) both
+subscribe to `match-events`. Because they use different `group_id`s, Kafka delivers every
+message to both groups independently — publishing one goal event produced a `processed:*` dedup
+marker in Redis for *both* groups from the same `event_id`, confirming each got its own copy.
+
+## Partition rebalancing (same consumer group)
+
+`match-events` was widened from 1 to 3 partitions (`kafka-topics.sh --alter --partitions 3`).
+Running two instances of `workers/notifications.py` with the same `group_id`:
+
+- Instance A alone: assigned `[0, 1, 2]`
+- Instance B joins: rebalance fires, A keeps `[0, 2]`, B gets `[1]`
+- Instance B is killed: rebalance fires again, A is reassigned `[0, 1, 2]`
+
+Each instance only ever consumed messages from partitions it was assigned. This is logged via an
+`aiokafka.abc.ConsumerRebalanceListener` (`on_partitions_assigned`/`on_partitions_revoked`) added
+to `workers/notifications.py`, tagged with the process's pid so multiple local instances are
+distinguishable in the logs.
+
+## Dead-letter queue
+
+Both workers now retry a failing message up to 3 times (with a small backoff), then publish it
+to `match-events-dlq` — with the original payload, the error, the group, and attempt count — and
+commit the offset anyway, so a permanently-failing ("poison") message can't stall the partition.
+Verified with a malformed event (missing `event_id`, which both handlers require for the SET NX
+dedup check): 3 failed attempts were logged, the message landed on `match-events-dlq`, and the
+next (valid) message on the same partition was processed immediately afterward — the offset
+advanced past the poison message instead of stalling on it.
+
+Note: since `handle()` is already idempotent (SET NX), a message that fails on attempt 1 but
+partially applies its side effect, then succeeds on attempt 2, cannot double-count — retries are
+safe for the same reason replay-after-crash is safe.
+
+# What Should Not Be Async
+
+**`hash_password` / `verify_password`** (`core/security.py`, wrapping `bcrypt.hashpw` /
+`bcrypt.checkpw`) should not be `async def`.
+
+**Why:** `async`/`await` only helps with I/O-bound work — a coroutine that's *waiting* on a
+socket, a disk, or another process can yield control back to the event loop so it can go serve
+other requests in the meantime. bcrypt hashing isn't waiting on anything; it's pure CPU-bound
+computation, and its slowness is the entire point (an adaptive work factor that deliberately
+costs tens-to-hundreds of milliseconds per call, so brute-forcing a leaked hash is expensive).
+If `hash_password` were declared `async def` and just called `bcrypt.hashpw` directly inside it,
+`await`ing it wouldn't offload the work anywhere — it would run synchronously on the single event
+loop thread for its full duration, and every other coroutine on that worker (every other
+in-flight request) would stall until it finished. Under load, one `/auth/register` call would
+pause the entire process, not just that request.
+
+This is already handled correctly in this codebase, not by accident: `register` and `login` in
+`routes/auth.py` are declared as plain `def`, not `async def`. FastAPI runs sync path-operation
+functions in a threadpool automatically, so the blocking bcrypt call ties up one thread-pool
+worker, not the event loop — concurrent requests on other routes keep flowing. Making these
+routes `async def` without also explicitly offloading the hash (e.g. `run_in_executor`) would be
+a regression, not an improvement, despite `async` reading as "the fast/modern option."
+
+The general rule this illustrates: reach for `async` for I/O-bound waiting (DB queries, Kafka
+publish/consume, Redis, HTTP calls — everything else in this API). For CPU-bound work, the
+correct tool is a thread or process pool, not `async def`.
+

@@ -6,6 +6,7 @@ from database.mongo import ensure_indexes
 from models import league, players, team, user
 from routes import auth, leagues, matches as matches_routes, players as players_routes, stats, teams, users
 from core.cache import r
+from core.events import start_producer, stop_producer
 from contextlib import asynccontextmanager
 
 
@@ -17,7 +18,12 @@ async def lifespan(app: FastAPI):
         print("Redis connected")
     except Exception as e:
         print(f"Redis unreachable: {e}")
+
+    # await start_producer()
+
     yield
+
+    # await stop_producer()
 
 
 app = FastAPI(title="Football API", version="0.2.0", lifespan=lifespan)

@@ -1,4 +1,5 @@
 import json
+import logging
 from aiokafka import AIOKafkaProducer
 
 producer: AIOKafkaProducer | None = None
@@ -14,8 +15,14 @@ async def start_producer():
     await producer.start()
 
 
+async def stop_producer():
+    global producer
+    if producer is not None:
+        await producer.stop()
+
+
 async def publish(topic: str, key, value: dict):
     try:
         await producer.send_and_wait(topic, key=key, value=value)
     except Exception as e:
-        logging.error("publish failed: %s", e)   # decide: swallow or 503?
+        logging.error("publish failed: %s", e)  # decide: swallow or 503?
